@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+requests
+plotly
+binance-connector
+websocket-client
+streamlit-autorefresh
+ntplib
