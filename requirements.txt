@@ -1,9 +1,8 @@
-streamlit
-pandas
-numpy
-requests
-plotly
-binance-connector
-websocket-client
-streamlit-autorefresh
-ntplib
+streamlit==1.37.1
+python-binance==1.0.17
+pandas==2.2.2
+numpy==1.26.4
+requests==2.31.0
+plotly==5.22.0
+websocket-client==1.8.0
+ntplib==0.4.0
