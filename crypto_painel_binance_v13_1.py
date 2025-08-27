@@ -12,7 +12,7 @@ Painel – Binance v13 (Scanner + Foco + Execução + PnL)
 • Acompanhamento do Trade Ativo: PnL ao vivo e PnL realizado ao encerrar.
 
 Rodar:
-    streamlit run crypto_painel_binance_v13.1.py
+    streamlit run crypto_painel_binance_v13_1.py
 Requisitos:
     pip install --upgrade streamlit pandas numpy requests python-binance plotly streamlit-autorefresh ntplib
 """
