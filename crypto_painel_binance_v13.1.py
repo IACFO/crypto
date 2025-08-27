@@ -158,15 +158,58 @@ def sync_client_time(client: Client) -> None:
     except Exception as e:
         st.warning(f"⚠️ Falha ao sincronizar tempo pelo serverTime: {e}")
 
-@st.cache_resource
-def get_binance_client():
-    api_key = st.secrets["binance"]["api_key"]
-    api_secret = st.secrets["binance"]["api_secret"]
-    c = Client(api_key=api_key, api_secret=api_secret)
-    sync_client_time(c)
-    return c
+@st.cache_resource(show_spinner=False)
+def get_binance_client() -> Client:
+    """
+    Ordem de prioridade para credenciais:
+    1) Variáveis de ambiente (Render/Server): BINANCE_API_KEY / BINANCE_API_SECRET
+    2) st.secrets["binance"]["api_key"] / st.secrets["binance"]["api_secret"] (local)
+    """
+    api_key = os.getenv("BINANCE_API_KEY")
+    api_secret = os.getenv("BINANCE_API_SECRET")
 
+    if not api_key or not api_secret:
+        try:
+            api_key = st.secrets["binance"]["api_key"]
+            api_secret = st.secrets["binance"]["api_secret"]
+        except Exception:
+            st.stop()  # aborta de forma limpa com mensagem amigável
+            raise RuntimeError(
+                "Credenciais da Binance não encontradas. "
+                "Defina BINANCE_API_KEY/BINANCE_API_SECRET ou use st.secrets."
+            )
+
+    client = Client(api_key=api_key, api_secret=api_secret)
+
+    # Ajuste de tempo para evitar APIError -1021 (timestamp fora do recvWindow)
+    try:
+        # Pegar o tempo do servidor em ms e aplicar offset interno do client
+        srv = client.get_server_time()  # {"serverTime": <ms>}
+        client.TIME_OFFSET = int(srv["serverTime"]) - int(time.time() * 1000)
+        st.caption(f"⏱️ Offset aplicado (server - local): {client.TIME_OFFSET} ms")
+    except Exception as e:
+        st.warning(f"⚠️ Não foi possível obter server time para TIME_OFFSET: {e}")
+
+    # Ping rápido nas futures para validar conectividade
+    try:
+        client.futures_ping()
+    except Exception as e:
+        st.error(f"❌ Falha no ping das Futures: {e}")
+
+    return client
+
+# Instância global cacheada
 client = get_binance_client()
+
+# ============================
+# ✅ Teste de conexão inicial (saldo)
+# ============================
+try:
+    account_info = client.futures_account(recvWindow=RECV_WINDOW_MS)
+    bal = account_info.get("totalWalletBalance") or account_info.get("availableBalance") or "—"
+    st.success(f"✅ Conectado à Binance Futures | Saldo: {bal} USDT")
+except Exception as e:
+    st.error(f"❌ Erro na conexão com Binance: {e}")
 
 def _call_with_resync(fn, *args, **kwargs):
     try:
