@@ -1,15 +1,15 @@
 services:
   - type: web
-    name: crypto-painel-binance
+    name: crypto-painel
     env: python
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "streamlit run crypto_painel_binance_v13_1.py --server.port $PORT --server.address 0.0.0.0 --server.headless true"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.8
-      - key: STREAMLIT_SERVER_HEADLESS
-        value: "true"
-      - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
-        value: "false"
-    healthCheckPath: /_stcore/health
+        value: 3.11.9
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run crypto_painel_binance_v13_1.py --server.port $PORT --server.address 0.0.0.0
+    autoDeploy: true
