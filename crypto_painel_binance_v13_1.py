@@ -129,12 +129,14 @@ client = get_binance_client()
 if client is None:
     st.warning("🔒 Sem chaves da Binance. Painel em **modo leitura** (scanner/análise). Configure BINANCE_API_KEY/SECRET no ambiente para habilitar execução.")
 else:
-    try:
-        info = client.futures_account(recvWindow=RECV_WINDOW_MS)
-        bal = info.get("totalWalletBalance") or info.get("availableBalance")
-        st.success(f"✅ Conectado à Binance Futures | Saldo: {bal} USDT")
-    except Exception as e:
-        st.error(f"❌ Erro na conexão com Binance (modo leitura ativo): {e}")
+    with st.sidebar.expander("🔐 Conexão Binance", expanded=False):
+        if st.button("Validar conexão / saldo", use_container_width=True):
+            try:
+                info = client.futures_account(recvWindow=RECV_WINDOW_MS)
+                bal = info.get("totalWalletBalance") or info.get("availableBalance")
+                st.success(f"✅ Conectado à Binance Futures | Saldo: {bal} USDT")
+            except Exception as e:
+                st.error(f"❌ Erro na conexão com Binance: {e}")
 
 # =========================
 # Dados – REST helpers
