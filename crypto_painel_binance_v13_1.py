@@ -18,8 +18,10 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# ✅ SDK oficial (NÃO usar python-binance)
-from binance.um_futures import UMFutures
+# 🔄 SDK OFICIAL: binance-connector (NÃO usar python-binance)
+from binance.um_futures import UMFutures  # ✅ correto
+# from binance.client import Client  # 🚫 NÃO USAR (python-binance)
+
 
 st.set_page_config(page_title="Painel Binance v13_1", layout="wide", initial_sidebar_state="collapsed")
 st.title("📊 Painel Binance v13_1 (UMFutures)")
