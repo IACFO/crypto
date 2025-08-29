@@ -1,0 +1,1 @@
+web: streamlit run crypto_painel_binance_v13_1.py --server.port $PORT --server.address 0.0.0.0
