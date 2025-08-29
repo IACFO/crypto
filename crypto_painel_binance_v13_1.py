@@ -2,7 +2,7 @@
 """
 Crypto Painel Binance v13.1 – Foco + Scanner + Execução
 -------------------------------------------------------
-• Multi-timeframe (1D / 1H / 5M) com EMA20/50/200, RSI, ATR
+• Multi-timeframe (1D / 1H / 5M) com EMA20/50/200, RSI, ATR 
 • Scanner de pares ordenado por confiança
 • Painel de foco com cálculo de SL/TP, alavancagem sugerida e execução real
 • Botões: COMPRAR/VENDER, FECHAR posição e INVERTER
