@@ -20,7 +20,38 @@ import requests
 import streamlit as st
 
 # SDK OFICIAL (NÃO usar python-binance)
-from binance.um_futures import UMFutures  # ✅
+# ===== Import robusto do cliente Futures (binance-connector) =====
+try:
+    # Caminho oficial nas versões 3.x do binance-connector
+    from binance.um_futures import UMFutures  # noqa: F401
+    CONNECTOR_OK = True
+    CONNECTOR_SRC = "binance-connector 3.x"
+except Exception as import_err:
+    CONNECTOR_OK = False
+    CONNECTOR_SRC = str(import_err)
+
+# Diagnóstico visível no app (ajuda a detectar build com cache antigo)
+try:
+    import binance  # módulo exposto pelo pacote 'binance-connector'
+    BINANCE_PKG_VERSION = getattr(binance, "__version__", "desconhecida")
+except Exception:
+    binance = None
+    BINANCE_PKG_VERSION = "não encontrado"
+
+if not CONNECTOR_OK:
+    import streamlit as st  # já está importado, mas garante disponibilidade aqui
+    st.error(
+        "Falha ao importar `UMFutures` do `binance-connector`.\n\n"
+        f"Detalhe do import: {CONNECTOR_SRC}\n"
+        f"binance.__version__: {BINANCE_PKG_VERSION}\n\n"
+        "Soluções:\n"
+        "1) Confirme no requirements.txt: `binance-connector==3.12.0`\n"
+        "2) Em Render: Settings → Clear build cache → Deploy latest\n"
+        "3) Garanta que NÃO há `python-binance` no requirements (conflita com `binance-connector`)."
+    )
+    st.stop()
+else:
+    st.caption(f"🧩 Conector: {CONNECTOR_SRC} | versão do pacote: {BINANCE_PKG_VERSION}")
 
 # ===== Streamlit =====
 st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
