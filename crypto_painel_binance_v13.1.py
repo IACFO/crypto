@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Painel – Binance v13_1 (UMFutures / binance-connector)
+Painel – Binance v13.1 (UMFutures / binance-connector)
 ------------------------------------------------------
 • Multi-timeframe (1D, 1H, 5M) com EMA20/50/200 + RSI
 • Sugestão: COMPRAR / VENDER / AGUARDAR
@@ -23,8 +23,8 @@ import streamlit as st
 from binance.um_futures import UMFutures  # ✅
 
 # ===== Streamlit =====
-st.set_page_config(page_title="📊 Painel – Binance v13_1 (UMFutures)", layout="wide")
-st.title("📊 Painel – Binance v13_1 (UMFutures)")
+st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
+st.title("📊 Painel – Binance v13.1 (UMFutures)")
 st.caption("Compatível com Render – usa binance-connector (UMFutures) e variáveis de ambiente.")
 
 BINANCE_REST = "https://api.binance.com"
