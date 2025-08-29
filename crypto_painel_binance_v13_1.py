@@ -229,7 +229,7 @@ def _get_client() -> Optional["Client"]:
 if do_connect:
     try:
         # Import só aqui (lazy)
-        from binance.client import Client
+        from binance.um_futures import UMFutures as Client
         api_key = st.secrets["binance"]["api_key"]
         api_secret = st.secrets["binance"]["api_secret"]
         client = Client(api_key=api_key, api_secret=api_secret)
