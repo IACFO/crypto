@@ -1,0 +1,15 @@
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+enableWebsocketCompression = true
+runOnSave = false
+# ajuda com proxies e conexões lentas
+websocketPingTimeout = 120
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
