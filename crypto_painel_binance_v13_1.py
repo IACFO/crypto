@@ -7,17 +7,6 @@ Painel – Binance v13_1 (UMFutures / binance-connector)
 • TP/SL pelo ATR (5m) — SL = k*ATR, TP = R*SL
 • Execução real em USDT-M Futures (UMFutures) + ajuste de alavancagem/margem
 • Compatível com Render (sem python-binance)
-
-Rodar local:
-    streamlit run crypto_painel_binance_v13_1.py
-
-requirements.txt:
-    streamlit==1.36.0
-    pandas==2.2.2
-    numpy==1.26.4
-    requests==2.32.3
-    binance-connector==3.6.1
-    ntplib==0.4.0
 """
 
 from __future__ import annotations
@@ -29,19 +18,16 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# 🔄 SDK OFICIAL: binance-connector (NÃO usar python-binance)
+# ✅ SDK oficial (NÃO usar python-binance)
 from binance.um_futures import UMFutures
-# from binance.client import Client  # 🚫 NÃO USAR
 
-# ============== Config Streamlit ==============
-st.set_page_config(page_title="📊 Painel – Binance v13_1 (UMFutures)", layout="wide")
-st.title("📊 Painel – Binance v13_1 (UMFutures)")
+st.set_page_config(page_title="Painel Binance v13_1", layout="wide", initial_sidebar_state="collapsed")
+st.title("📊 Painel Binance v13_1 (UMFutures)")
 st.caption("Compatível com Render – usa `binance-connector` (UMFutures).")
 
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
 
-# ============== NTP (apenas referência) ==============
 def show_ntp_reference() -> None:
     try:
         import ntplib
@@ -54,16 +40,17 @@ def show_ntp_reference() -> None:
 
 show_ntp_reference()
 
-# ============== Cliente UMFutures ==============
 @st.cache_resource
 def get_client() -> UMFutures:
     api_key = st.secrets["binance"]["api_key"]
     api_secret = st.secrets["binance"]["api_secret"]
     cl = UMFutures(key=api_key, secret=api_secret)
-    # ping e server time
-    _ = cl.ping()
-    srv = cl.time()  # {'serverTime': ...}
-    st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
+    try:
+        cl.ping()
+        srv = cl.time()  # {'serverTime': ...}
+        st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
+    except Exception as e:
+        st.warning(f"Falha ao pingar/time: {e}")
     return cl
 
 client = get_client()
