@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Painel – Binance v13_1 (UMFutures / binance-connector)
-----------------------------------------------------------------
+------------------------------------------------------
 • Multi-timeframe (1D, 1H, 5M) com EMA20/50/200 + RSI
 • Sugestão: COMPRAR / VENDER / AGUARDAR
-• TP/SL pelo ATR (5m) — SL = k*ATR, TP = R*SL
-• Execução real em USDT-M Futures (UMFutures) + ajuste de alavancagem/margem
-• Compatível com Render (sem python-binance)
+• TP/SL via ATR (5m)
+• Execução em USDT-M Futures (UMFutures)
+• Somente variáveis de ambiente (os.environ) para as credenciais
 """
 
 from __future__ import annotations
+import os
 import time
 from typing import Dict, Optional
 
@@ -18,18 +19,18 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# 🔄 SDK OFICIAL: binance-connector (NÃO usar python-binance)
-from binance.um_futures import UMFutures  # ✅ correto
-# from binance.client import Client  # 🚫 NÃO USAR (python-binance)
+# SDK OFICIAL (NÃO usar python-binance)
+from binance.um_futures import UMFutures  # ✅
 
-
-st.set_page_config(page_title="Painel Binance v13_1", layout="wide", initial_sidebar_state="collapsed")
-st.title("📊 Painel Binance v13_1 (UMFutures)")
-st.caption("Compatível com Render – usa `binance-connector` (UMFutures).")
+# ===== Streamlit =====
+st.set_page_config(page_title="📊 Painel – Binance v13_1 (UMFutures)", layout="wide")
+st.title("📊 Painel – Binance v13_1 (UMFutures)")
+st.caption("Compatível com Render – usa binance-connector (UMFutures) e variáveis de ambiente.")
 
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
 
+# ===== NTP (referência) =====
 def show_ntp_reference() -> None:
     try:
         import ntplib
@@ -42,17 +43,23 @@ def show_ntp_reference() -> None:
 
 show_ntp_reference()
 
+# ===== Cliente UMFutures via ENV =====
 @st.cache_resource
 def get_client() -> UMFutures:
-    api_key = st.secrets["binance"]["api_key"]
-    api_secret = st.secrets["binance"]["api_secret"]
+    api_key = os.environ.get("BINANCE_API_KEY", "").strip()
+    api_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+    if not api_key or not api_secret:
+        st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET como variáveis de ambiente.")
+        st.stop()
     cl = UMFutures(key=api_key, secret=api_secret)
+    # Diagnóstico inicial
     try:
         cl.ping()
         srv = cl.time()  # {'serverTime': ...}
         st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
     except Exception as e:
-        st.warning(f"Falha ao pingar/time: {e}")
+        st.error(f"Falha ao conectar no UMFutures: {e}")
+        st.stop()
     return cl
 
 client = get_client()
