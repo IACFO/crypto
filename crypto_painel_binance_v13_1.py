@@ -11,16 +11,17 @@ Painel – Binance v13.1 (UMFutures / binance-connector)
 Rodar local:
     streamlit run crypto_painel_binance_v13.1.py
 
-Requisitos (Render / local):
+requirements.txt:
     streamlit==1.36.0
     pandas==2.2.2
     numpy==1.26.4
     requests==2.32.3
     binance-connector==3.6.1
+    ntplib==0.4.0
 """
 
 from __future__ import annotations
-import json, time
+import time
 from typing import Dict, Optional
 
 import numpy as np
@@ -28,12 +29,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# ------------------------------
-# 👇 ALTERAÇÃO PRINCIPAL AQUI
-# ------------------------------
-# Em vez de `from binance.client import Client` (python-binance),
-# usamos o SDK oficial `binance-connector` para USDT-M Futures (UMFutures).
+# 🔄 SDK OFICIAL: binance-connector (NÃO usar python-binance)
 from binance.um_futures import UMFutures
+# from binance.client import Client  # 🚫 NÃO USAR
 
 # ============== Config Streamlit ==============
 st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
@@ -43,7 +41,7 @@ st.caption("Compatível com Render – usa `binance-connector` (UMFutures).")
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
 
-# ============== NTP (apenas referência, não mexe no relógio) ==============
+# ============== NTP (apenas referência) ==============
 def show_ntp_reference() -> None:
     try:
         import ntplib
@@ -62,9 +60,9 @@ def get_client() -> UMFutures:
     api_key = st.secrets["binance"]["api_key"]
     api_secret = st.secrets["binance"]["api_secret"]
     cl = UMFutures(key=api_key, secret=api_secret)
-    # Pinga e pega o server time para calcular offset interno
+    # ping e server time
     _ = cl.ping()
-    srv = cl.time()  # {'serverTime': 169...}
+    srv = cl.time()  # {'serverTime': ...}
     st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
     return cl
 
@@ -72,9 +70,6 @@ client = get_client()
 
 # ============== Helpers REST públicos (klines spot) ==============
 def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    """
-    Usa REST público Spot para pegar candles (serve para análise).
-    """
     r = requests.get(
         f"{BINANCE_REST}/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": min(int(limit), 1500)},
@@ -299,13 +294,9 @@ with colS2:
 
 # ============== Funções Futures (UMFutures) ==============
 def setup_futures_pair(symbol: str, leverage: int, margin_type: str) -> bool:
-    """
-    Ajusta margem (ISOLATED/CROSSED) e alavancagem para o símbolo.
-    """
     try:
         client.change_margin_type(symbol=symbol, marginType=margin_type, recvWindow=RECV_WINDOW_MS)
     except Exception as e:
-        # Quando já está naquele tipo, a API retorna erro; ignoramos esse caso.
         if "No need to change margin type" not in str(e):
             st.error(f"Erro ao definir margem: {e}")
             return False
@@ -317,9 +308,6 @@ def setup_futures_pair(symbol: str, leverage: int, margin_type: str) -> bool:
     return True
 
 def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_price: float, tp_price: float):
-    """
-    Cria ordem de mercado e em seguida SL/TP como STOP_MARKET e TAKE_PROFIT_MARKET com closePosition=true.
-    """
     try:
         # Entrada a mercado
         order_resp = client.new_order(
@@ -329,85 +317,49 @@ def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_price: fl
             quantity=quantity,
             recvWindow=RECV_WINDOW_MS,
         )
-
-        # SL / TP (reduce-only via closePosition)
+        # SL/TP como closePosition
         if side == "BUY":
             client.new_order(
-                symbol=symbol,
-                side="SELL",
-                type="STOP_MARKET",
-                stopPrice=round(sl_price, 6),
-                closePosition="true",
-                timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
+                symbol=symbol, side="SELL", type="STOP_MARKET",
+                stopPrice=round(sl_price, 6), closePosition="true",
+                timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
             client.new_order(
-                symbol=symbol,
-                side="SELL",
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=round(tp_price, 6),
-                closePosition="true",
-                timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
+                symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
+                stopPrice=round(tp_price, 6), closePosition="true",
+                timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
         else:
             client.new_order(
-                symbol=symbol,
-                side="BUY",
-                type="STOP_MARKET",
-                stopPrice=round(sl_price, 6),
-                closePosition="true",
-                timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
+                symbol=symbol, side="BUY", type="STOP_MARKET",
+                stopPrice=round(sl_price, 6), closePosition="true",
+                timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
             client.new_order(
-                symbol=symbol,
-                side="BUY",
-                type="TAKE_PROFIT_MARKET",
-                stopPrice=round(tp_price, 6),
-                closePosition="true",
-                timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
+                symbol=symbol, side="BUY", type="TAKE_PROFIT_MARKET",
+                stopPrice=round(tp_price, 6), closePosition="true",
+                timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
-
         return True, order_resp
     except Exception as e:
         return False, str(e)
 
 def get_symbol_precision(symbol: str) -> Dict[str, int]:
-    """
-    Pega precisões de quantidade e preço do símbolo para arredondamento correto.
-    """
     try:
-        ex = client.exchange_info()  # grande; cache poderia ser adicionado
-        symbols = ex.get("symbols", [])
-        for s in symbols:
+        ex = client.exchange_info()
+        for s in ex.get("symbols", []):
             if s.get("symbol") == symbol:
-                qty_step = None
-                px_tick = None
+                qty_step = None; px_tick = None
                 for f in s.get("filters", []):
                     if f.get("filterType") == "LOT_SIZE":
-                        step = f.get("stepSize")
-                        if step:
-                            qty_step = step
+                        qty_step = f.get("stepSize")
                     if f.get("filterType") == "PRICE_FILTER":
-                        tick = f.get("tickSize")
-                        if tick:
-                            px_tick = tick
-
+                        px_tick = f.get("tickSize")
                 def dec_places(x: Optional[str]) -> int:
-                    if not x:
-                        return 3
-                    # ex: '0.00100000' -> 3
-                    s = x.rstrip("0")
-                    if "." in s:
-                        return len(s.split(".")[1])
-                    return 0
-
-                return {
-                    "qty_precision": dec_places(qty_step),
-                    "px_precision": dec_places(px_tick),
-                }
+                    if not x: return 3
+                    s2 = x.rstrip("0")
+                    return len(s2.split(".")[1]) if "." in s2 else 0
+                return {"qty_precision": dec_places(qty_step), "px_precision": dec_places(px_tick)}
     except Exception:
         pass
     return {"qty_precision": 3, "px_precision": 2}
@@ -415,7 +367,6 @@ def get_symbol_precision(symbol: str) -> Dict[str, int]:
 # ============== Execução ==============
 st.subheader("⚡ Execução")
 colE1, colE2, colE3, colE4 = st.columns([1,1,1,1])
-
 with colE1:
     desired_side = st.selectbox("Direção", ["BUY","SELL"], index=0)
 
@@ -423,16 +374,20 @@ prec = get_symbol_precision(symbol)
 qty_prec = int(prec["qty_precision"])
 px_prec = int(prec["px_precision"])
 
-# qty calculada pela stake * lev / preço
 qty_calc = (stake * max(leverage, 1)) / max(price_now, 1e-9)
 qty = float(np.floor(qty_calc * (10**qty_prec)) / (10**qty_prec))
 
 with colE2:
-    qty = st.number_input(f"Quantidade ({symbol})", min_value=0.0, value=float(qty), step=10**(-qty_prec), format=f"%.{qty_prec}f")
+    qty = st.number_input(f"Quantidade ({symbol})", min_value=0.0, value=float(qty),
+                          step=10**(-qty_prec), format=f"%.{qty_prec}f")
 with colE3:
-    sl_input = st.number_input(f"Stop (SL)", min_value=0.0, value=float(round(sl_price or price_now, px_prec)), step=10**(-px_prec), format=f"%.{px_prec}f")
+    sl_input = st.number_input("Stop (SL)", min_value=0.0,
+                               value=float(round(sl_price or price_now, px_prec)),
+                               step=10**(-px_prec), format=f"%.{px_prec}f")
 with colE4:
-    tp_input = st.number_input(f"Alvo (TP)", min_value=0.0, value=float(round(tp_price or price_now, px_prec)), step=10**(-px_prec), format=f"%.{px_prec}f")
+    tp_input = st.number_input("Alvo (TP)", min_value=0.0,
+                               value=float(round(tp_price or price_now, px_prec)),
+                               step=10**(-px_prec), format=f"%.{px_prec}f")
 
 colB1, colB2 = st.columns([1,1])
 with colB1:
@@ -442,25 +397,20 @@ with colB1:
 with colB2:
     execute_now = st.button("🚀 Executar Ação", use_container_width=True)
 
-# Saldo / conexão
+# Saldo / conexão (opcional)
 try:
     acc = client.account(recvWindow=RECV_WINDOW_MS)
-    total_margin_balance = acc.get("totalMarginBalance", None)
-    if total_margin_balance:
+    total_margin_balance = acc.get("totalMarginBalance")
+    if total_margin_balance is not None:
         st.caption(f"✅ Conectado | Balance: {total_margin_balance} USDT")
 except Exception as e:
     st.error(f"❌ Erro na conexão com Binance: {e}")
 
-# Execução
 if execute_now:
-    # garante setup (usuário pode esquecer de clicar)
     if setup_futures_pair(symbol, leverage, margin_type):
         ok, res = executar_ordem_mercado(
-            symbol=symbol,
-            side=desired_side,
-            quantity=qty,
-            sl_price=sl_input,
-            tp_price=tp_input
+            symbol=symbol, side=desired_side, quantity=qty,
+            sl_price=sl_input, tp_price=tp_input
         )
         if ok:
             st.success("✅ Ordem executada com sucesso!")
@@ -468,4 +418,4 @@ if execute_now:
         else:
             st.error(f"❌ Erro na execução: {res}")
 
-st.caption("⚠️ Uso educacional. Ajuste TP/SL/quantidade de acordo com sua gestão e precisões do símbolo.")
+st.caption("⚠️ Uso educacional. Ajuste TP/SL/quantidade de acordo com sua gestão e as precisões do símbolo.")
