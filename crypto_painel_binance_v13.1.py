@@ -20,39 +20,76 @@ import requests
 import streamlit as st
 
 # SDK OFICIAL (NÃO usar python-binance)
-# ===== Import robusto do cliente Futures (binance-connector) =====
+# ===== Import robusto do cliente Futures (binance-connector) + detecção de sombra =====
+import sys, inspect, pathlib, streamlit as st
+
+def _is_site_packages(path_str: str) -> bool:
+    p = pathlib.Path(path_str).as_posix().lower()
+    return "/site-packages/" in p or "\\site-packages\\" in p
+
+# 1) Verifica se existe módulo local "binance" sombreando o pacote do PyPI
+_local_shadow_msg = None
+if "binance" in sys.modules:
+    try:
+        import binance  # type: ignore
+        mod_path = inspect.getfile(binance)
+        if not _is_site_packages(mod_path):
+            _local_shadow_msg = f"O Python está importando 'binance' de {mod_path}, não do site-packages."
+    except Exception:
+        pass
+else:
+    # Tenta importar para inspecionar o caminho
+    try:
+        import binance  # type: ignore
+        mod_path = inspect.getfile(binance)
+        if not _is_site_packages(mod_path):
+            _local_shadow_msg = f"O Python está importando 'binance' de {mod_path}, não do site-packages."
+    except Exception:
+        binance = None
+        mod_path = "não encontrado"
+
+if _local_shadow_msg:
+    st.error(
+        "📦 Conflito de nomes detectado: há um **diretório/arquivo chamado `binance` no seu projeto** "
+        "que está sombreando o pacote `binance-connector` do PyPI.\n\n"
+        f"{_local_shadow_msg}\n\n"
+        "→ Renomeie a pasta/arquivo para algo como `binance_local/` e ajuste os imports.\n"
+        "→ Depois, em Render: *Settings → Clear build cache → Deploy latest*."
+    )
+    st.stop()
+
+# 2) Agora importa o cliente oficial do conector
 try:
-    # Caminho oficial nas versões 3.x do binance-connector
-    from binance.um_futures import UMFutures  # noqa: F401
+    from binance.um_futures import UMFutures  # ✅ caminho correto nas versões 3.x
     CONNECTOR_OK = True
-    CONNECTOR_SRC = "binance-connector 3.x"
+    # tenta obter a versão do pacote instalado
+    try:
+        import binance  # type: ignore
+        BINANCE_PKG_VERSION = getattr(binance, "__version__", "desconhecida")
+        BINANCE_PKG_FILE = inspect.getfile(binance)
+    except Exception:
+        BINANCE_PKG_VERSION = "desconhecida"
+        BINANCE_PKG_FILE = "desconhecido"
 except Exception as import_err:
     CONNECTOR_OK = False
-    CONNECTOR_SRC = str(import_err)
-
-# Diagnóstico visível no app (ajuda a detectar build com cache antigo)
-try:
-    import binance  # módulo exposto pelo pacote 'binance-connector'
-    BINANCE_PKG_VERSION = getattr(binance, "__version__", "desconhecida")
-except Exception:
-    binance = None
     BINANCE_PKG_VERSION = "não encontrado"
+    BINANCE_PKG_FILE = str(import_err)
 
 if not CONNECTOR_OK:
-    import streamlit as st  # já está importado, mas garante disponibilidade aqui
     st.error(
         "Falha ao importar `UMFutures` do `binance-connector`.\n\n"
-        f"Detalhe do import: {CONNECTOR_SRC}\n"
+        f"Detalhe: {BINANCE_PKG_FILE}\n"
         f"binance.__version__: {BINANCE_PKG_VERSION}\n\n"
-        "Soluções:\n"
-        "1) Confirme no requirements.txt: `binance-connector==3.12.0`\n"
-        "2) Em Render: Settings → Clear build cache → Deploy latest\n"
-        "3) Garanta que NÃO há `python-binance` no requirements (conflita com `binance-connector`)."
+        "Verifique:\n"
+        "1) `requirements.txt` contém `binance-connector==3.12.0`\n"
+        "2) Render → Settings → Clear build cache → Deploy latest\n"
+        "3) Não existe `python-binance` no requirements\n"
+        "4) Não existe pasta/arquivo chamado `binance` no repositório (sombra)."
     )
     st.stop()
 else:
-    st.caption(f"🧩 Conector: {CONNECTOR_SRC} | versão do pacote: {BINANCE_PKG_VERSION}")
-
+    st.caption(f"🧩 binance-connector OK | versão: {BINANCE_PKG_VERSION}")
+    
 # ===== Streamlit =====
 st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
 st.title("📊 Painel – Binance v13.1 (UMFutures)")
