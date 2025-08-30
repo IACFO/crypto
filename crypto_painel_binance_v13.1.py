@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Painel – Binance v13.1 (UMFutures / binance-connector)
+Painel – Binance v13.1 (UMFutures / binance-connector com fallback)
 """
 from __future__ import annotations
-import os, time, importlib.util, importlib
+import os, time, importlib.util
 from typing import Dict, Optional
 
 import numpy as np
@@ -11,52 +11,110 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# ===== Streamlit (tem que vir antes de usar st.*) =====
 st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
-
-# ===== Verificação do pacote binance-connector (diagnóstico robusto) =====
-def _diagnose_binance_connector():
-    # 1) O pacote 'binance-connector' expõe o módulo top-level 'binance'
-    spec_pkg = importlib.util.find_spec("binance")
-    pkg_path = getattr(spec_pkg, "origin", None) if spec_pkg else None
-
-    # 2) Tentar localizar o submódulo 'binance.um_futures'
-    spec_umf = importlib.util.find_spec("binance.um_futures")
-
-    # 3) Versão (quando disponível)
-    try:
-        import binance  # type: ignore
-        pkg_ver = getattr(binance, "__version__", "desconhecida")
-    except Exception:
-        pkg_ver = "não encontrado"
-
-    return spec_pkg is not None, spec_umf is not None, pkg_ver, pkg_path
-
-pkg_ok, umf_ok, pkg_ver, pkg_path = _diagnose_binance_connector()
-
-if not pkg_ok or not umf_ok:
-    st.error(
-        "Falha ao importar `UMFutures` do **binance-connector**.\n\n"
-        f"Detalhe: módulo 'binance' encontrado? {pkg_ok} | submódulo 'binance.um_futures' encontrado? {umf_ok}\n"
-        f"versão reportada: {pkg_ver}\n"
-        f"caminho carregado: {pkg_path}\n\n"
-        "Como corrigir:\n"
-        "1) Confirme no **requirements.txt**: `binance-connector==3.12.0`\n"
-        "2) No Render: **Settings → Clear build cache → Deploy latest**\n"
-        "3) Verifique que **não existe** `python-binance` no requirements\n"
-        "4) Verifique que **não existe** arquivo/pasta chamada `binance` dentro do repositório (isso sombreia o pacote)\n"
-        "5) Build Command: `pip install --upgrade pip wheel setuptools && pip install -r requirements.txt`\n"
-        "6) Start Command: `streamlit run crypto_painel_binance_v13.1.py --server.port $PORT --server.address 0.0.0.0`\n"
-    )
-    st.stop()
-
-# Importa definitivamente (sabemos que existe)
-from binance.um_futures import UMFutures  # type: ignore
-
-st.caption(f"🧩 Conector OK • binance-connector versão: {pkg_ver} • caminho: {pkg_path}")
+st.title("📊 Painel – Binance v13.1 (UMFutures)")
 
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
+
+# ========== Detecta backend disponível ==========
+def _has_mod(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+BACKEND = None
+PKG_VER = "desconhecida"
+PKG_PATH = None
+
+if _has_mod("binance.um_futures"):
+    from binance.um_futures import UMFutures  # type: ignore
+    BACKEND = "connector"
+    try:
+        import binance  # type: ignore
+        PKG_VER = getattr(binance, "__version__", "desconhecida")
+        PKG_PATH = importlib.util.find_spec("binance").origin
+    except Exception:
+        pass
+elif _has_mod("binance.client"):
+    from binance.client import Client as PBClient  # type: ignore
+    BACKEND = "python-binance"
+    try:
+        import binance  # type: ignore
+        PKG_VER = getattr(binance, "__version__", "desconhecida")
+        PKG_PATH = importlib.util.find_spec("binance").origin
+    except Exception:
+        pass
+
+# ========== Adapter p/ manter a mesma interface ==========
+class FuturesAdapter:
+    def __init__(self, api_key: str, api_secret: str):
+        self.backend = BACKEND
+        if self.backend == "connector":
+            # binance-connector (UMFutures)
+            self._cli = UMFutures(key=api_key, secret=api_secret)
+        elif self.backend == "python-binance":
+            # python-binance
+            self._cli = PBClient(api_key, api_secret)
+        else:
+            self._cli = None
+
+    # ------- Métodos compatíveis com o seu código -------
+    def ping(self):
+        if self.backend == "connector":
+            return self._cli.ping()
+        return self._cli.futures_ping()
+
+    def time(self):
+        if self.backend == "connector":
+            return self._cli.time()
+        return self._cli.futures_time()
+
+    def change_margin_type(self, symbol: str, marginType: str, recvWindow: int):
+        if self.backend == "connector":
+            return self._cli.change_margin_type(symbol=symbol, marginType=marginType, recvWindow=recvWindow)
+        return self._cli.futures_change_margin_type(symbol=symbol, marginType=marginType, recvWindow=recvWindow)
+
+    def change_leverage(self, symbol: str, leverage: int, recvWindow: int):
+        if self.backend == "connector":
+            return self._cli.change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=recvWindow)
+        return self._cli.futures_change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=recvWindow)
+
+    def new_order(self, **kwargs):
+        """
+        kwargs esperados: symbol, side, type, quantity, recvWindow,
+        e opcionalmente: stopPrice, closePosition, timeInForce
+        """
+        if self.backend == "connector":
+            return self._cli.new_order(**kwargs)
+        # python-binance: mapeia para futures_create_order
+        # ajusta booleanos e formats
+        k = dict(kwargs)
+        if "closePosition" in k:
+            v = k["closePosition"]
+            # python-binance aceita bool True/False
+            if isinstance(v, str):
+                k["closePosition"] = (v.lower() == "true")
+        return self._cli.futures_create_order(**k)
+
+    def account(self, recvWindow: int):
+        if self.backend == "connector":
+            return self._cli.account(recvWindow=recvWindow)
+        return self._cli.futures_account(recvWindow=recvWindow)
+
+    def exchange_info(self):
+        if self.backend == "connector":
+            return self._cli.exchange_info()
+        return self._cli.futures_exchange_info()
+
+# ========== Diagnóstico claro ==========
+if BACKEND is None:
+    st.error(
+        "Nenhum backend Binance disponível.\n\n"
+        "Instale **binance-connector==3.12.0** (recomendado) OU **python-binance**.\n"
+        "No Render: ajuste o Build Command para desinstalar python-binance e instalar binance-connector."
+    )
+    st.stop()
+
+st.caption(f"🧩 Backend: {BACKEND} • versão do pacote: {PKG_VER} • caminho: {PKG_PATH}")
 
 # ===== NTP (referência) =====
 def show_ntp_reference() -> None:
@@ -71,23 +129,23 @@ def show_ntp_reference() -> None:
 
 show_ntp_reference()
 
-# ===== Cliente UMFutures via ENV =====
+# ===== Cliente via ENV (mesma assinatura que você usa) =====
 @st.cache_resource
-def get_client() -> UMFutures:
+def get_client() -> FuturesAdapter:
     api_key = os.environ.get("BINANCE_API_KEY", "").strip()
     api_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
     if not api_key or not api_secret:
         st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET como variáveis de ambiente.")
         st.stop()
-    cl = UMFutures(key=api_key, secret=api_secret)
+    cli = FuturesAdapter(api_key, api_secret)
     try:
-        cl.ping()
-        srv = cl.time()  # {'serverTime': ...}
+        cli.ping()
+        srv = cli.time()  # {'serverTime': ...}
         st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
     except Exception as e:
-        st.error(f"Falha ao conectar no UMFutures: {e}")
+        st.error(f"Falha ao conectar no Futures: {e}")
         st.stop()
-    return cl
+    return cli
 
 client = get_client()
 
