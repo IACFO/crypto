@@ -1,37 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-Painel – Binance v13 (Scanner + Foco + Execução + PnL)
+Painel – Binance v13.1 (Scanner + Foco + Execução + PnL, robusto p/ Render)
 -------------------------------------------------------------------------------
-• Multi-timeframe (1D, 1H, 5M) com EMA20/50/200 + RSI
-• Sinal: COMPRAR / VENDER / AGUARDAR
-• TP/SL a partir do ATR(5m): SL = k*ATR, TP = R*SL
-• Alavancagem sugerida (heurística) com teto por perfil e por risco de banca
-• Execução no painel de Foco: ajusta qty por stepSize/minQty, arredonda preço por tickSize,
-  define margem/alavancagem, fecha posição oposta se necessário e abre nova com SL/TP.
-• Tratamento de erro -1021 (tempo): sincroniza e repete a chamada.
-• Acompanhamento do Trade Ativo: PnL ao vivo e PnL realizado ao encerrar.
-
-Rodar local:
-    streamlit run crypto_painel_binance_v13.py
+• Mantém leitura/scan mesmo se execução estiver indisponível por região.
+• Modo de backend por ENV: BINANCE_MODE = off | testnet | live  (default: off)
+• Testnet Futures suportada via python-binance (oficial).
+• Trata o erro de região restrita e desabilita execução com aviso claro.
 """
 
 from __future__ import annotations
 
-# ===================== Imports =====================
-import os, math, time, json
+import os, math, time
 from typing import Optional, Dict
+
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# >>> usamos python-binance (o mesmo do seu ambiente local)
+# === Só usamos python-binance (como no seu ambiente local) ===
 from binance.client import Client
 from binance.enums import *
 
-# ===================== Config visual =====================
-st.set_page_config(page_title="📊 Painel – Binance v13", layout="wide")
+# ---------------- UI base ----------------
+st.set_page_config(page_title="📊 Painel – Binance v13.1", layout="wide")
 st.markdown("""
 <style>
 :root{
@@ -53,25 +46,25 @@ div.stButton > button:disabled{opacity:.45}
 hr{border-color:var(--border);}
 </style>
 """, unsafe_allow_html=True)
-st.title("📊 Painel – Binance v13")
+st.title("📊 Painel – Binance v13.1")
 
-# ===================== NTP (referência visual) =====================
+# ---------------- NTP (visual) ----------------
 def show_ntp_reference():
     try:
         import ntplib
         from time import ctime
         ntp = ntplib.NTPClient()
-        resp = ntp.request('pool.ntp.org', version=3, timeout=2)
-        st.caption(f"✅ Relógio de referência NTP: {ctime(resp.tx_time)}")
+        resp = ntp.request("pool.ntp.org", version=3, timeout=2)
+        st.caption(f"🕒 NTP ref: {ctime(resp.tx_time)}")
     except Exception as e:
-        st.caption(f"⚠️ NTP indisponível: {e}")
+        st.caption(f"🕒 NTP ref indisponível: {e}")
 show_ntp_reference()
 
-# ===================== Constantes =====================
+# ---------------- Constantes ----------------
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 90_000  # 90s
 
-# ===================== Helpers REST (klines) =====================
+# ---------------- Helpers REST (klines públicos) ----------------
 def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
     r = requests.get(
         f"{BINANCE_REST}/api/v3/klines",
@@ -88,7 +81,7 @@ def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFr
         df[c] = df[c].astype(float)
     return df
 
-# ===================== Indicadores =====================
+# ---------------- Indicadores ----------------
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
     up = delta.clip(lower=0)
@@ -140,7 +133,7 @@ def confidence_from_features(row: pd.Series, trend: str, align_count: int) -> in
     conf = (0.35*stf + 0.25*vr + 0.20*sr + 0.10*rsi_comp + 0.10*align_bonus) * 100
     return int(round(min(max(conf, 0), 100)))
 
-# ===================== Multi-timeframe Loader =====================
+# ---------------- Multi-timeframe ----------------
 @st.cache_data(ttl=30)
 def load_multitf(symbol: str) -> Dict[str, pd.DataFrame]:
     d1 = add_core_features(fetch_klines_rest(symbol, "1d", 400))
@@ -148,39 +141,63 @@ def load_multitf(symbol: str) -> Dict[str, pd.DataFrame]:
     m5 = add_core_features(fetch_klines_rest(symbol, "5m", 500))
     return {"1D": d1, "1H": h1, "5M": m5}
 
-# ===================== Binance Client + Offset/Retry =====================
-def sync_client_time(client: Client) -> None:
+# ---------------- Backend mode (ENV) ----------------
+BINANCE_MODE = os.environ.get("BINANCE_MODE", "off").strip().lower()  # 'off' | 'testnet' | 'live'
+EXECUTION_ENABLED = BINANCE_MODE in ("testnet", "live")
+execution_blocked_reason = None
+
+# ---------------- Client helpers ----------------
+def sync_client_time(c: Client) -> None:
     try:
-        srv = client.get_server_time()  # {"serverTime": <ms>}
+        srv = c.get_server_time()
         drift = int(srv["serverTime"]) - int(time.time() * 1000)
-        setattr(client, "timestamp_offset", drift)  # atributo atual
-        setattr(client, "TIME_OFFSET", drift)       # compatibilidade
+        setattr(c, "timestamp_offset", drift)
+        setattr(c, "TIME_OFFSET", drift)
         st.caption(f"⏱️ Offset aplicado (server - local): {drift} ms")
     except Exception as e:
-        st.warning(f"⚠️ Falha ao sincronizar tempo pelo serverTime: {e}")
+        st.warning(f"⚠️ Falha ao sincronizar tempo: {e}")
 
-@st.cache_resource
-def get_binance_client():
-    # >>> Render: credenciais por VARIÁVEIS DE AMBIENTE
+def make_client() -> Optional[Client]:
+    """Cria client conforme BINANCE_MODE. Se houver bloqueio regional, retorna None e seta motivo."""
+    global execution_blocked_reason
+    if not EXECUTION_ENABLED:
+        return None
+
     api_key = os.environ.get("BINANCE_API_KEY", "").strip()
     api_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
-
-    # Fallback local opcional: st.secrets (se existir)
-    if (not api_key or not api_secret) and "binance" in st.secrets:
-        api_key = st.secrets["binance"].get("api_key", "")
-        api_secret = st.secrets["binance"].get("api_secret", "")
-
     if not api_key or not api_secret:
-        st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET (Render → Environment).")
-        st.stop()
+        execution_blocked_reason = "Credenciais ausentes (BINANCE_API_KEY / BINANCE_API_SECRET)"
+        return None
 
-    c = Client(api_key=api_key, api_secret=api_secret)
-    sync_client_time(c)
-    return c
+    try:
+        if BINANCE_MODE == "testnet":
+            c = Client(api_key, api_secret, testnet=True)
+            # URLs de futures testnet (python-binance)
+            c.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+            c.FUTURES_DATA_URL = "https://testnet.binancefuture.com/futures/data"
+        else:
+            c = Client(api_key, api_secret)
 
-client = get_binance_client()
+        # Primeiro ping privado (pode disparar restrição de região)
+        c.ping()
+        sync_client_time(c)
+        return c
+
+    except Exception as e:
+        s = str(e)
+        # Mensagem típica de região restrita
+        if "restricted location" in s.lower():
+            execution_blocked_reason = "Execução desabilitada: localização do servidor não é elegível p/ Binance.com."
+            return None
+        execution_blocked_reason = f"Falha ao inicializar client: {s}"
+        return None
+
+# Cria client sob demanda (não trava o app)
+client: Optional[Client] = make_client()
 
 def _call_with_resync(fn, *args, **kwargs):
+    if client is None:
+        raise RuntimeError("Client indisponível para chamadas privadas.")
     try:
         return fn(*args, **kwargs)
     except Exception as e:
@@ -190,12 +207,15 @@ def _call_with_resync(fn, *args, **kwargs):
             return fn(*args, **kwargs)
         raise
 
-# ===================== Exchange Info (filtros) =====================
+# ---------------- Filtros / arredondamentos ----------------
 @st.cache_data(ttl=600)
 def get_symbol_filters(symbol: str) -> Dict[str, float]:
+    if client is None:
+        # fallback genérico só pra calcular qty localmente
+        return {"stepSize": 0.001, "minQty": 0.001, "tickSize": 0.01}
     info = _call_with_resync(client.futures_exchange_info)
     sym = next((s for s in info["symbols"] if s["symbol"] == symbol), None)
-    if not sym:  # fallback
+    if not sym:
         return {"stepSize": 0.001, "minQty": 0.001, "tickSize": 0.01}
     lot = next((f for f in sym["filters"] if f["filterType"] == "LOT_SIZE"), None)
     prc = next((f for f in sym["filters"] if f["filterType"] == "PRICE_FILTER"), None)
@@ -212,28 +232,21 @@ def round_step(value: float, step: float, mode: str = "floor") -> float:
         return math.ceil(value/step) * step
     return round(value/step) * step
 
-# ===================== Setup de Par =====================
-def setup_futures_pair(client, symbol: str, leverage: int = 10, margin_type: str = "ISOLATED") -> bool:
+# ---------------- Setup / execução ----------------
+def setup_futures_pair(symbol: str, leverage: int = 10, margin_type: str = "ISOLATED") -> bool:
     try:
-        _call_with_resync(
-            client.futures_change_margin_type,
-            symbol=symbol, marginType=margin_type, recvWindow=RECV_WINDOW_MS
-        )
+        _call_with_resync(client.futures_change_margin_type, symbol=symbol, marginType=margin_type, recvWindow=RECV_WINDOW_MS)
     except Exception as e:
         if "No need to change margin type" not in str(e):
             st.error(f"Erro ao definir margem: {e}")
             return False
     try:
-        _call_with_resync(
-            client.futures_change_leverage,
-            symbol=symbol, leverage=int(leverage), recvWindow=RECV_WINDOW_MS
-        )
+        _call_with_resync(client.futures_change_leverage, symbol=symbol, leverage=int(leverage), recvWindow=RECV_WINDOW_MS)
     except Exception as e:
         st.error(f"Erro ao definir alavancagem: {e}")
         return False
     return True
 
-# ===================== Posição atual / Fechar =====================
 def get_position_info(symbol: str) -> dict:
     infos = _call_with_resync(client.futures_position_information, symbol=symbol, recvWindow=RECV_WINDOW_MS)
     return infos[0] if infos else {}
@@ -257,8 +270,7 @@ def close_position_market(symbol: str) -> Optional[dict]:
         reduceOnly=True, recvWindow=RECV_WINDOW_MS
     )
 
-# ===================== Execução de Ordem =====================
-def executar_ordem_mercado(client, symbol: str, side: str, quantity: float, sl_price: float, tp_price: float):
+def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_price: float, tp_price: float):
     try:
         ordem = _call_with_resync(
             client.futures_create_order,
@@ -270,32 +282,19 @@ def executar_ordem_mercado(client, symbol: str, side: str, quantity: float, sl_p
         )
 
         if side == "BUY":
-            _call_with_resync(
-                client.futures_create_order,
-                symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_STOP_MARKET,
-                stopPrice=sl_price, closePosition=True, timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
-            )
-            _call_with_resync(
-                client.futures_create_order,
-                symbol=symbol, side=SIDE_SELL, type=ORDER_TYPE_TAKE_PROFIT_MARKET,
-                stopPrice=tp_price, closePosition=True, timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
-            )
+            _call_with_resync(client.futures_create_order, symbol=symbol, side=SIDE_SELL,
+                              type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price,
+                              closePosition=True, timeInForce="GTC", recvWindow=RECV_WINDOW_MS)
+            _call_with_resync(client.futures_create_order, symbol=symbol, side=SIDE_SELL,
+                              type=ORDER_TYPE_TAKE_PROFIT_MARKET, stopPrice=tp_price,
+                              closePosition=True, timeInForce="GTC", recvWindow=RECV_WINDOW_MS)
         else:
-            _call_with_resync(
-                client.futures_create_order,
-                symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_STOP_MARKET,
-                stopPrice=sl_price, closePosition=True, timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
-            )
-            _call_with_resync(
-                client.futures_create_order,
-                symbol=symbol, side=SIDE_BUY, type=ORDER_TYPE_TAKE_PROFIT_MARKET,
-                stopPrice=tp_price, closePosition=True, timeInForce="GTC",
-                recvWindow=RECV_WINDOW_MS,
-            )
-
+            _call_with_resync(client.futures_create_order, symbol=symbol, side=SIDE_BUY,
+                              type=ORDER_TYPE_STOP_MARKET, stopPrice=sl_price,
+                              closePosition=True, timeInForce="GTC", recvWindow=RECV_WINDOW_MS)
+            _call_with_resync(client.futures_create_order, symbol=symbol, side=SIDE_BUY,
+                              type=ORDER_TYPE_TAKE_PROFIT_MARKET, stopPrice=tp_price,
+                              closePosition=True, timeInForce="GTC", recvWindow=RECV_WINDOW_MS)
         return True, ordem
     except Exception as e:
         return False, str(e)
@@ -306,26 +305,21 @@ def executar_trade_automatico(suggestion_local, symbol_local, price_now_local,
         st.warning("Sem sugestão de trade válida.")
         return
 
-    # Ajuste de filtros do símbolo
     f = get_symbol_filters(symbol_local)
     step, minQty, tick = f["stepSize"], f["minQty"], f["tickSize"]
 
-    # Ajuste de preços para o tickSize
     sl_price_local = round_step(sl_price_local, tick, "floor")
     tp_price_local = round_step(tp_price_local, tick, "floor")
 
-    # Define margem e alavancagem
-    if not setup_futures_pair(client, symbol_local, lev_conf_local):
+    if not setup_futures_pair(symbol_local, lev_conf_local):
         return
 
-    # Quantidade sugerida em moeda base
     raw_qty = (stake_local * lev_conf_local) / price_now_local
     qty = max(minQty, round_step(raw_qty, step, "floor"))
     if qty < minQty:
         st.error(f"Quantidade calculada ({qty}) menor que minQty ({minQty}). Aumente o stake.")
         return
 
-    # Fechar/inverter se necessário
     pos = get_position_amt(symbol_local)
     new_side = "BUY" if suggestion_local == "COMPRAR" else "SELL"
     if pos > 0 and new_side == "SELL":
@@ -333,16 +327,14 @@ def executar_trade_automatico(suggestion_local, symbol_local, price_now_local,
     elif pos < 0 and new_side == "BUY":
         close_position_market(symbol_local)
 
-    success, result = executar_ordem_mercado(client, symbol_local, new_side, qty, sl_price_local, tp_price_local)
+    success, result = executar_ordem_mercado(symbol_local, new_side, qty, sl_price_local, tp_price_local)
     if success:
         st.success(f"✅ Ordem executada ({suggestion_local}) | Qty: {qty}")
-
-        # Salva estado do trade ativo
         info = get_position_info(symbol_local)
         entry_price = float(info.get("entryPrice", 0) or 0)
         st.session_state.active_trade = {
             "symbol": symbol_local,
-            "side": new_side,           # BUY/SELL
+            "side": new_side,
             "qty": qty,
             "entry_time_ms": int(time.time()*1000),
             "entry_price": entry_price if entry_price>0 else price_now_local,
@@ -354,104 +346,24 @@ def executar_trade_automatico(suggestion_local, symbol_local, price_now_local,
     else:
         st.error(f"❌ Erro na execução: {result}")
 
-# ===================== Teste de conexão =====================
-try:
-    acc = _call_with_resync(client.futures_account, recvWindow=RECV_WINDOW_MS)
-    bal = acc.get("totalWalletBalance") or acc.get("availableBalance")
-    st.success(f"✅ Conectado à Binance Futures | Saldo: {bal} USDT")
-except Exception as e:
-    st.error(f"❌ Erro na conexão com Binance: {e}")
+# ---------------- Controles principais ----------------
+st.subheader("📡 Painel")
+colA, colB, colC = st.columns([1.5, 1, 1])
+with colA:
+    focus_symbol_list = ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"]
+    symbol = st.selectbox("Par (USDT-M Futures)", focus_symbol_list, index=1)
+with colB:
+    margin_type = st.selectbox("Tipo de margem", ["ISOLATED","CROSSED"], index=0)
+with colC:
+    leverage = st.number_input("Alavancagem", 1, 125, 10, step=1)
 
-# ===================== Scanner =====================
-st.subheader("🧭 Scanner de pares – alinhamento + confiança")
-pairs = st.multiselect(
-    "Selecione os pares para escanear",
-    ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"],
-    default=["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"]
-)
-colsc1, colsc2, colsc3 = st.columns([1,1,1])
-with colsc1:
-    scan_interval = st.number_input("⏱️ Intervalo auto-scan (s)", 10, 300, 60, step=5)
-with colsc2:
-    alert_thresh = st.number_input("🔔 Confiança para alertar", 60, 95, 80, step=1)
-with colsc3:
-    auto_scan = st.toggle("Auto-refresh", True)
-if auto_scan:
-    st_autorefresh(interval=scan_interval*1000, key="auto_scan_v13")
-
-@st.cache_data(ttl=25)
-def scan_pair(sym: str) -> Dict:
-    d1 = add_core_features(fetch_klines_rest(sym, "1d", 400))
-    h1 = add_core_features(fetch_klines_rest(sym, "1h", 500))
-    m5 = add_core_features(fetch_klines_rest(sym, "5m", 500))
-
-    b1, b2, b3 = d1.iloc[-1], h1.iloc[-1], m5.iloc[-1]
-    trends = [trend_label(x) for x in [b1, b2, b3]]
-    count_up = trends.count("ALTA"); count_dn = trends.count("BAIXA")
-    align = max(count_up, count_dn)
-    consensus = "ALTA" if count_up > count_dn else ("BAIXA" if count_dn > count_up else "NEUTRA")
-    conf = confidence_from_features(b3, consensus, align)
-    price = float(b3["c"]); atr5 = float(b3["atr14"]) or 0.0
-
-    sug = "AGUARDAR"
-    if align == 3 and conf >= 60:
-        sug = "COMPRAR" if consensus == "ALTA" else ("VENDER" if consensus == "BAIXA" else "AGUARDAR")
-    elif align == 2 and conf >= 70:
-        sug = "COMPRAR" if consensus == "ALTA" else ("VENDER" if consensus == "BAIXA" else "AGUARDAR")
-
-    sl = tp = None; stop_pct = tp_pct = 0.0
-    if sug != "AGUARDAR" and atr5 > 0:
-        if sug == "COMPRAR":
-            sl = price - 1.0*atr5; tp = price + 1.5*atr5
-            stop_pct = (price - sl)/price; tp_pct = (tp - price)/price
-        else:
-            sl = price + 1.0*atr5; tp = price - 1.5*atr5
-            stop_pct = (sl - price)/price; tp_pct = (price - tp)/price
-
-    base_from_conf = 2 if conf < 55 else 4 if conf < 65 else 6 if conf < 75 else 9 if conf < 85 else 12 if conf < 92 else 15
-    if stop_pct > 0:
-        if stop_pct < 0.003: base_from_conf = int(round(base_from_conf*1.25))
-        elif stop_pct > 0.006: base_from_conf = int(round(base_from_conf*0.7))
-    lev = max(1, min(base_from_conf, 20))
-
-    score = align * conf
-    return {
-        "Par": sym, "Consenso": consensus, "Alinhamento": align, "Confiança": conf,
-        "Sugestão": sug, "Preço": round(price, 6),
-        "Stop": (round(sl, 6) if sl else None), "Alvo": (round(tp, 6) if tp else None),
-        "Stop%": round(stop_pct*100, 2) if stop_pct>0 else None,
-        "Alvo%": round(tp_pct*100, 2) if tp_pct>0 else None,
-        "Lev sug": lev, "Score": score
-    }
-
-rows = [scan_pair(p) for p in pairs] if pairs else []
-df_scan = pd.DataFrame(rows)
-if not df_scan.empty:
-    sug_order = {"COMPRAR":0,"VENDER":1,"AGUARDAR":2}
-    df_scan["SugOrd"] = df_scan["Sugestão"].map(sug_order)
-    df_scan = df_scan.sort_values(["Confiança","SugOrd"], ascending=[False, True]).drop(columns="SugOrd")
-    st.dataframe(df_scan, use_container_width=True, height=360)
-else:
-    st.info("Selecione pares para escanear.")
-
-best_symbol = df_scan.iloc[0]["Par"] if not df_scan.empty else "ETHUSDT"
-
-# ===================== Painel de Foco (Leitura + Execução) =====================
-st.subheader("🎯 Foco do Painel (Leitura + Execução)")
-colf1, colf2 = st.columns([2,1])
-with colf1:
-    focus_symbol_default_list = pairs or ["ETHUSDT"]
-    default_index = focus_symbol_default_list.index(best_symbol) if best_symbol in focus_symbol_default_list else 0
-    focus_symbol = st.selectbox("Par em foco", focus_symbol_default_list, index=default_index)
-with colf2:
-    st.caption("Dica: por padrão usamos o melhor do scanner, mas você pode escolher outro aqui.")
-
-mtf = load_multitf(focus_symbol)
-if any(df is None or df.empty for df in mtf.values()):
-    st.error("Falha ao carregar dados multi-timeframe para o foco.")
+mtf = load_multitf(symbol)
+if any(df.empty for df in mtf.values()):
+    st.error("Falha ao carregar dados multi-timeframe.")
     st.stop()
 
-blocks = {}
+# --------- Leitura ----------
+blocks: Dict[str, dict] = {}
 for tf, df in mtf.items():
     r = df.iloc[-1]
     blocks[tf] = {
@@ -469,27 +381,35 @@ align_count = max(count_up, count_dn)
 consensus = "ALTA" if count_up>count_dn else ("BAIXA" if count_dn>count_up else "NEUTRA")
 conf = confidence_from_features(mtf["5M"].iloc[-1], consensus, align_count)
 
-# Parâmetros do sinal
-st.subheader("🧮 Parâmetros do Sinal")
-cA,cB,cC,cD,cE = st.columns([1,1,1,1,1])
-with cA:
-    atr_mult_sl = st.number_input("SL = ATR ×", 0.2, 5.0, 1.0)
-with cB:
-    rr = st.number_input("R:R (TP = R × SL)", 0.5, 5.0, 1.5)
-with cC:
-    min_conf = st.number_input("Confiança mínima", 0, 100, 60)
-with cD:
-    perfil = st.selectbox("Perfil", ["Conservador","Moderado","Agressivo"], index=1)
-with cE:
-    banca = st.number_input("Banca (USDT)", 10.0, 1e9, 1000.0, step=10.0)
+cL, cR = st.columns([2,1])
+with cL:
+    st.subheader("🔎 Leitura Multi-timeframe")
+    a,b,c = st.columns(3)
+    for tf, col in zip(["1D","1H","5M"], [a,b,c]):
+        info = blocks[tf]
+        badge = "🟢" if info["trend"]=="ALTA" else ("🔴" if info["trend"]=="BAIXA" else "⚪")
+        col.metric(f"{tf} – {badge} {info['trend']}",
+                   value=f"RSI {info['rsi']:.1f}",
+                   help=f"EMA20/50/200: {info['ema20']:.4f} / {info['ema50']:.4f} / {info['ema200']:.4f}\n"
+                        f"Vol.rel: {info['vol_rel']:.2f}× | Str: {info['strength']:.2f}")
+    st.caption(f"Alinhamento: {align_count}/3 • Consenso: {consensus}")
+with cR:
+    st.subheader("🔐 Confiança do Sinal")
+    st.metric("Nível", f"{conf}/100")
 
-cF,cG,cH = st.columns([1,1,1])
-with cF:
+# --------- Parâmetros ----------
+st.subheader("🎯 Parâmetros de Trade")
+col_r1, col_r2, col_r3, col_r4, col_r5 = st.columns(5)
+with col_r1:
+    atr_mult_sl = st.number_input("SL = ATR ×", 0.2, 5.0, 1.0, step=0.1)
+with col_r2:
+    rr = st.number_input("R:R (TP = R × SL)", 0.5, 5.0, 1.5, step=0.1)
+with col_r3:
+    min_conf = st.number_input("Confiança mínima", 0, 100, 60, step=5)
+with col_r4:
     stake = st.number_input("Stake (USDT)", 1.0, 1e9, 50.0, step=1.0)
-with cG:
-    risco_pct = st.number_input("Risco máx por trade (%)", 0.1, 10.0, 1.0)/100.0
-with cH:
-    taker_fee_pct = st.number_input("Taxa taker (%)", 0.0, 0.5, 0.04)/100.0
+with col_r5:
+    banca = st.number_input("Banca (USDT)", 10.0, 1e9, 1000.0, step=10.0)
 
 price_now = blocks["5M"]["close"]
 atr5 = blocks["5M"]["atr"] or 0.0
@@ -520,45 +440,26 @@ if suggestion in ("COMPRAR","VENDER") and atr5>0:
 
 # Alavancagem sugerida
 profile_caps = {"Conservador":5,"Moderado":10,"Agressivo":20}
-cap = profile_caps.get(perfil, 10)
+cap = profile_caps.get("Moderado", 10)  # simples
 base_from_conf = 2 if conf<55 else 4 if conf<65 else 6 if conf<75 else 9 if conf<85 else 12 if conf<92 else 15
 if stop_pct>0:
     if stop_pct < 0.003: base_from_conf = int(round(base_from_conf*1.25))
     elif stop_pct > 0.006: base_from_conf = int(round(base_from_conf*0.7))
 lev_conf = max(1, min(base_from_conf, cap))
-if stop_pct>0:
-    lev_cap_risk = (banca*risco_pct) / (stake*stop_pct)
-    lev_conf = int(max(1, min(lev_conf, cap, lev_cap_risk)))
 
 # Estimativas
+taker_fee_pct = st.number_input("Taxa taker (%)", 0.0, 0.5, 0.04, step=0.01) / 100.0
 fees_roundtrip = 2*taker_fee_pct
-net_gain_pct = max(tp_pct - fees_roundtrip, 0) * lev_conf if tp_price else 0.0
+net_gain_pct = max((tp_pct - fees_roundtrip), 0) * lev_conf if tp_price else 0.0
 net_loss_pct = (stop_pct + fees_roundtrip) * lev_conf if sl_price else 0.0
 est_gain_usdt = stake * net_gain_pct if tp_price else 0.0
 est_loss_usdt = stake * net_loss_pct if sl_price else 0.0
 
-# Métricas
-cL, cR = st.columns([2,1])
-with cL:
-    st.subheader("🔎 Leitura Multi-timeframe")
-    ca, cb, cc = st.columns(3)
-    for tf, col in zip(["1D","1H","5M"], [ca,cb,cc]):
-        info = blocks[tf]
-        badge = "🟢" if info["trend"]=="ALTA" else ("🔴" if info["trend"]=="BAIXA" else "⚪")
-        col.metric(f"{tf} – {badge} {info['trend']}", value=f"RSI {info['rsi']:.1f}",
-                   help=f"EMA20/50/200: {info['ema20']:.4f} / {info['ema50']:.4f} / {info['ema200']:.4f}\n"
-                        f"Vol.rel: {info['vol_rel']:.2f}× | Str: {info['strength']:.2f}")
-    st.caption(f"Alinhamento: {align_count}/3 • Consenso: {consensus}")
-with cR:
-    st.subheader("🔐 Confiança do Sinal")
-    st.metric("Nível de confiança", f"{conf}/100")
-
-st.subheader("🎯 Sugestão de Ação + TP/SL + Alavancagem")
-cSug1, cSug2 = st.columns([1,2])
-with cSug1:
+colS1, colS2 = st.columns([1,2])
+with colS1:
     color = "🟢" if suggestion=="COMPRAR" else ("🔴" if suggestion=="VENDER" else "⏸️")
     st.metric("Sugestão", f"{color} {suggestion}", help=reason)
-with cSug2:
+with colS2:
     if sl_price and tp_price:
         st.markdown('<div class="sugestao-box">', unsafe_allow_html=True)
         st.write(f"**Entrada**: ~{price_now:.6f} | **Stop**: {sl_price:.6f} | **Alvo**: {tp_price:.6f}")
@@ -566,48 +467,59 @@ with cSug2:
         st.write(f"**Estimativa** → TP: ~{est_gain_usdt:.2f} | SL: ~{est_loss_usdt:.2f}")
         st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("Sem TP/SL e alavancagem sugeridos (aguarde melhor alinhamento/confiança).")
+        st.info("Sem TP/SL sugeridos (aguarde melhor alinhamento/confiança).")
 
-# ===================== Execução =====================
-st.subheader("⚙️ Execução")
-can_execute = suggestion in ("COMPRAR","VENDER") and sl_price and tp_price and lev_conf>=1
-btn_label = f"🚀 Executar {suggestion} {focus_symbol}"
-clicked = st.button(btn_label, type="primary", use_container_width=True, disabled=not can_execute)
+# --------- Execução ----------
+st.subheader("⚡ Execução")
+if not EXECUTION_ENABLED:
+    st.info("Execução está **desativada** (BINANCE_MODE=off). Defina BINANCE_MODE=testnet ou live para habilitar.")
+elif client is None:
+    # Execução pretendida, mas indisponível (ex.: região bloqueada)
+    st.error(f"Execução indisponível. {execution_blocked_reason or ''}".strip())
+else:
+    can_execute = suggestion in ("COMPRAR","VENDER") and sl_price and tp_price and lev_conf>=1
+    btn_label = f"🚀 Executar {suggestion} {symbol}"
+    clicked = st.button(btn_label, type="primary", use_container_width=True, disabled=not can_execute)
 
-if clicked and can_execute:
-    executar_trade_automatico(
-        suggestion_local=suggestion,
-        symbol_local=focus_symbol,
-        price_now_local=price_now,
-        stake_local=stake,
-        lev_conf_local=lev_conf,
-        sl_price_local=sl_price,
-        tp_price_local=tp_price
-    )
+    # Status de conta (opcional)
+    try:
+        acc = _call_with_resync(client.futures_account, recvWindow=RECV_WINDOW_MS)
+        bal = acc.get("totalWalletBalance") or acc.get("availableBalance")
+        st.caption(f"✅ Conectado | Balance: {bal} USDT | Modo: {BINANCE_MODE.upper()}")
+    except Exception as e:
+        st.warning(f"Conexão privada indisponível: {e}")
 
-# ===================== Trade Ativo – acompanhamento e PnL =====================
+    if clicked and can_execute:
+        executar_trade_automatico(
+            suggestion_local=suggestion,
+            symbol_local=symbol,
+            price_now_local=price_now,
+            stake_local=stake,
+            lev_conf_local=lev_conf,
+            sl_price_local=sl_price,
+            tp_price_local=tp_price
+        )
+
+# --------- Trade Ativo / PnL ----------
 st.subheader("📘 Trade Ativo (tempo real)")
-st_autorefresh(interval=3000, key="live_trade_refresh_v13")
+st_autorefresh(interval=3000, key="live_trade_refresh_v13_1")
 
 if "active_trade" not in st.session_state:
     st.session_state.active_trade = None
-
 active = st.session_state.active_trade
 
 def get_income_pnl_since(symbol: str, start_ms: int) -> float:
-    """Soma PnL realizado desde start_ms para o símbolo."""
     try:
         hist = _call_with_resync(
             client.futures_income_history,
             symbol=symbol, incomeType="REALIZED_PNL",
             startTime=start_ms, recvWindow=RECV_WINDOW_MS
         )
-        total = sum(float(x.get("income", 0) or 0) for x in hist)
-        return float(total)
+        return float(sum(float(x.get("income", 0) or 0) for x in hist))
     except Exception:
         return 0.0
 
-if active and active.get("symbol"):
+if EXECUTION_ENABLED and client is not None and active and active.get("symbol"):
     sym = active["symbol"]
     info = get_position_info(sym)
     amt = float(info.get("positionAmt", 0) or 0)
@@ -619,7 +531,7 @@ if active and active.get("symbol"):
     with c1: st.metric("Símbolo", sym)
     with c2: st.metric("Lado", "Long" if amt>0 else ("Short" if amt<0 else "—"))
     with c3: st.metric("Qtd", f"{abs(amt):.6f}")
-    with c4: st.metric("Preço de entrada", f"{entry_price:.6f}")
+    with c4: st.metric("Entrada", f"{entry_price:.6f}")
 
     c5,c6,c7 = st.columns([1,1,1])
     margin_approx = active.get("stake", 0.0)
@@ -643,6 +555,6 @@ if active and active.get("symbol"):
             st.error(f"❌ Posição encerrada | PnL realizado: {realized:.4f} USDT")
         st.session_state.active_trade = None
 else:
-    st.info("Nenhum trade ativo no momento. Execute um sinal no painel de foco para começar.")
+    st.info("Nenhum trade ativo ou execução desabilitada / indisponível no momento.")
 
-st.caption("⚠️ Educacional. A alavancagem sugerida é heurística (confiança+stop+perfil+risco). Ajuste conforme sua conta/gestão.")
+st.caption("⚠️ Observação legal: respeite os Termos de Uso da exchange e a elegibilidade por região. Testnet disponível para testes.")
