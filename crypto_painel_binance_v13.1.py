@@ -65,14 +65,24 @@ BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 90_000  # 90s
 
 # ---------------- Helpers REST (klines públicos) ----------------
-def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
-    r = requests.get(
-        f"{BINANCE_REST}/api/v3/klines",
-        params={"symbol": symbol, "interval": interval, "limit": min(int(limit), 1500)},
-        timeout=10,
-    )
+# Endpoints públicos com fallback (evita 451/403/região)
+KLINES_BASES = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api3.binance.com",
+    # Mirror público oficial para dados (geralmente não bloqueado)
+    "https://data-api.binance.vision",
+]
+
+def _fetch_klines_from(base: str, symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    # data-api.binance.vision usa a MESMA rota /api/v3/klines
+    url = f"{base}/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": min(int(limit), 1500)}
+    r = requests.get(url, params=params, timeout=10)
+    # Em caso de 451/403/5xx, deixamos levantar para tentar próximo base
     r.raise_for_status()
     data = r.json()
+
     cols = ["openTime","open","high","low","close","volume","closeTime","quote","n","tb_base","tb_quote","ignore"]
     df = pd.DataFrame(data, columns=cols)[["openTime","open","high","low","close","volume"]]
     df.columns = ["t","o","h","l","c","v"]
@@ -80,6 +90,32 @@ def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFr
     for c in ["o","h","l","c","v"]:
         df[c] = df[c].astype(float)
     return df
+
+def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
+    last_error = None
+    for base in KLINES_BASES:
+        try:
+            df = _fetch_klines_from(base, symbol, interval, limit)
+            # Mostra uma vez qual mirror foi usado (para diagnóstico)
+            st.session_state.setdefault("_klines_base_used", set())
+            if base not in st.session_state["_klines_base_used"]:
+                st.session_state["_klines_base_used"].add(base)
+                st.caption(f"📡 Klines carregados via **{base}**")
+            return df
+        except requests.HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            # 451/403/429/5xx → tenta próximo mirror
+            if status in (451, 403, 429) or (status and 500 <= status < 600):
+                last_error = e
+                continue
+            # Outros erros HTTP: propaga
+            raise
+        except Exception as e:
+            # Timeout / rede etc → tenta próximo
+            last_error = e
+            continue
+    # Se chegou aqui, todos falharam
+    raise last_error if last_error else RuntimeError("Falha ao obter klines em todos os endpoints")
 
 # ---------------- Indicadores ----------------
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
