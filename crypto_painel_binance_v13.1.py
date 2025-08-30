@@ -1,122 +1,166 @@
 # -*- coding: utf-8 -*-
 """
-Painel – Binance v13.1 (UMFutures / binance-connector com fallback)
+Painel – Binance v13.1 (UMFutures c/ fallback python-binance)
+-------------------------------------------------------------
+• Multi-timeframe (1D, 1H, 5M) com EMA20/50/200 + RSI
+• Sugestão: COMPRAR / VENDER / AGUARDAR
+• TP/SL via ATR (5m)
+• Execução em USDT-M Futures
+• Somente variáveis de ambiente (os.environ) para as credenciais
 """
+
 from __future__ import annotations
-import os, time, importlib.util
-from typing import Dict, Optional
+import os
+import time
+from typing import Dict, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
-st.title("📊 Painel – Binance v13.1 (UMFutures)")
+# =======================
+# Configuração do app
+# =======================
+st.set_page_config(page_title="📊 Painel – Binance v13.1", layout="wide")
+st.title("📊 Painel – Binance v13.1")
+st.caption("Backend dinâmico: tenta `binance-connector (UMFutures)` e cai para `python-binance (Futures)` se necessário.")
 
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
 
-# ========== Detecta backend disponível ==========
-def _has_mod(name: str) -> bool:
-    return importlib.util.find_spec(name) is not None
+# =======================
+# Descoberta do backend
+# =======================
+BACKEND = None  # "connector" | "python-binance"
+BACKEND_VERSION = "desconhecida"
+BACKEND_PATH = "desconhecido"
 
-BACKEND = None
-PKG_VER = "desconhecida"
-PKG_PATH = None
+UMFutures = None
+Client = None
 
-if _has_mod("binance.um_futures"):
-    from binance.um_futures import UMFutures  # type: ignore
+# 1) Tenta binance-connector (recomendado)
+try:
+    from binance.um_futures import UMFutures as _UMF
+    import binance as _binance
+    UMFutures = _UMF
     BACKEND = "connector"
+    BACKEND_VERSION = getattr(_binance, "__version__", "desconhecida")
+    BACKEND_PATH = getattr(_binance, "__file__", "desconhecido")
+except Exception:
+    UMFutures = None
+
+# 2) Fallback: python-binance
+if BACKEND is None:
     try:
-        import binance  # type: ignore
-        PKG_VER = getattr(binance, "__version__", "desconhecida")
-        PKG_PATH = importlib.util.find_spec("binance").origin
+        from binance.client import Client as _Client
+        import binance as _binance2
+        Client = _Client
+        BACKEND = "python-binance"
+        BACKEND_VERSION = getattr(_binance2, "__version__", "desconhecida")
+        BACKEND_PATH = getattr(_binance2, "__file__", "desconhecido")
     except Exception:
-        pass
-elif _has_mod("binance.client"):
-    from binance.client import Client as PBClient  # type: ignore
-    BACKEND = "python-binance"
-    try:
-        import binance  # type: ignore
-        PKG_VER = getattr(binance, "__version__", "desconhecida")
-        PKG_PATH = importlib.util.find_spec("binance").origin
-    except Exception:
-        pass
+        Client = None
 
-# ========== Adapter p/ manter a mesma interface ==========
-class FuturesAdapter:
-    def __init__(self, api_key: str, api_secret: str):
-        self.backend = BACKEND
-        if self.backend == "connector":
-            # binance-connector (UMFutures)
-            self._cli = UMFutures(key=api_key, secret=api_secret)
-        elif self.backend == "python-binance":
-            # python-binance
-            self._cli = PBClient(api_key, api_secret)
-        else:
-            self._cli = None
-
-    # ------- Métodos compatíveis com o seu código -------
-    def ping(self):
-        if self.backend == "connector":
-            return self._cli.ping()
-        return self._cli.futures_ping()
-
-    def time(self):
-        if self.backend == "connector":
-            return self._cli.time()
-        return self._cli.futures_time()
-
-    def change_margin_type(self, symbol: str, marginType: str, recvWindow: int):
-        if self.backend == "connector":
-            return self._cli.change_margin_type(symbol=symbol, marginType=marginType, recvWindow=recvWindow)
-        return self._cli.futures_change_margin_type(symbol=symbol, marginType=marginType, recvWindow=recvWindow)
-
-    def change_leverage(self, symbol: str, leverage: int, recvWindow: int):
-        if self.backend == "connector":
-            return self._cli.change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=recvWindow)
-        return self._cli.futures_change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=recvWindow)
-
-    def new_order(self, **kwargs):
-        """
-        kwargs esperados: symbol, side, type, quantity, recvWindow,
-        e opcionalmente: stopPrice, closePosition, timeInForce
-        """
-        if self.backend == "connector":
-            return self._cli.new_order(**kwargs)
-        # python-binance: mapeia para futures_create_order
-        # ajusta booleanos e formats
-        k = dict(kwargs)
-        if "closePosition" in k:
-            v = k["closePosition"]
-            # python-binance aceita bool True/False
-            if isinstance(v, str):
-                k["closePosition"] = (v.lower() == "true")
-        return self._cli.futures_create_order(**k)
-
-    def account(self, recvWindow: int):
-        if self.backend == "connector":
-            return self._cli.account(recvWindow=recvWindow)
-        return self._cli.futures_account(recvWindow=recvWindow)
-
-    def exchange_info(self):
-        if self.backend == "connector":
-            return self._cli.exchange_info()
-        return self._cli.futures_exchange_info()
-
-# ========== Diagnóstico claro ==========
+# Mensagem de diagnóstico
 if BACKEND is None:
     st.error(
         "Nenhum backend Binance disponível.\n\n"
-        "Instale **binance-connector==3.12.0** (recomendado) OU **python-binance**.\n"
-        "No Render: ajuste o Build Command para desinstalar python-binance e instalar binance-connector."
+        "Instale `binance-connector==3.12.0` (recomendado) OU `python-binance`.\n"
+        "No Render, use o Build Command para desinstalar `python-binance/binance` antigos e instalar do requirements.\n"
     )
     st.stop()
+else:
+    badge = "✅" if BACKEND == "connector" else "⚠️ Fallback"
+    st.caption(f"{badge} Backend: **{BACKEND}** | versão: `{BACKEND_VERSION}` | path: `{BACKEND_PATH}`")
 
-st.caption(f"🧩 Backend: {BACKEND} • versão do pacote: {PKG_VER} • caminho: {PKG_PATH}")
+# =======================
+# Abstração do cliente
+# =======================
+class FuturesAPI:
+    """Camada fina de compatibilidade entre UMFutures (binance-connector) e Client (python-binance)."""
 
-# ===== NTP (referência) =====
+    def __init__(self):
+        self.api_key = os.environ.get("BINANCE_API_KEY", "").strip()
+        self.api_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+        if not self.api_key or not self.api_secret:
+            st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET como variáveis de ambiente.")
+            st.stop()
+
+        if BACKEND == "connector":
+            self.kind = "connector"
+            self.cli = UMFutures(key=self.api_key, secret=self.api_secret)
+        else:
+            self.kind = "python-binance"
+            self.cli = Client(api_key=self.api_key, api_secret=self.api_secret)
+
+    # --- saúde/conexão
+    def ping(self) -> Any:
+        if self.kind == "connector":
+            return self.cli.ping()
+        else:
+            return self.cli.futures_ping()
+
+    def server_time(self) -> Dict[str, Any]:
+        if self.kind == "connector":
+            return self.cli.time()  # {'serverTime': ...}
+        else:
+            return self.cli.futures_time()  # {'serverTime': ...}
+
+    # --- info/exchange
+    def exchange_info(self) -> Dict[str, Any]:
+        if self.kind == "connector":
+            return self.cli.exchange_info()
+        else:
+            return self.cli.futures_exchange_info()
+
+    # --- conta
+    def account(self) -> Dict[str, Any]:
+        if self.kind == "connector":
+            return self.cli.account(recvWindow=RECV_WINDOW_MS)
+        else:
+            return self.cli.futures_account(recvWindow=RECV_WINDOW_MS)
+
+    # --- ajustes
+    def change_margin_type(self, symbol: str, marginType: str):
+        if self.kind == "connector":
+            return self.cli.change_margin_type(symbol=symbol, marginType=marginType, recvWindow=RECV_WINDOW_MS)
+        else:
+            return self.cli.futures_change_margin_type(symbol=symbol, marginType=marginType, recvWindow=RECV_WINDOW_MS)
+
+    def change_leverage(self, symbol: str, leverage: int):
+        if self.kind == "connector":
+            return self.cli.change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=RECV_WINDOW_MS)
+        else:
+            return self.cli.futures_change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=RECV_WINDOW_MS)
+
+    # --- ordens
+    def new_order(self, **kwargs):
+        """kwargs esperados: symbol, side, type, quantity, [stopPrice], [closePosition], [timeInForce], recvWindow"""
+        if self.kind == "connector":
+            return self.cli.new_order(**kwargs)
+        else:
+            # mapear booleans e strings conforme python-binance
+            return self.cli.futures_create_order(**kwargs)
+
+# Instancia cliente + checagem
+@st.cache_resource
+def get_client() -> FuturesAPI:
+    api = FuturesAPI()
+    try:
+        api.ping()
+        t = api.server_time()
+        st.caption(f"⏱️ Server time (ms): {t.get('serverTime')}")
+    except Exception as e:
+        st.error(f"Falha ao conectar no backend ({BACKEND}): {e}")
+        st.stop()
+    return api
+
+client = get_client()
+
+# =======================
+# NTP (referência)
+# =======================
 def show_ntp_reference() -> None:
     try:
         import ntplib
@@ -129,27 +173,9 @@ def show_ntp_reference() -> None:
 
 show_ntp_reference()
 
-# ===== Cliente via ENV (mesma assinatura que você usa) =====
-@st.cache_resource
-def get_client() -> FuturesAdapter:
-    api_key = os.environ.get("BINANCE_API_KEY", "").strip()
-    api_secret = os.environ.get("BINANCE_API_SECRET", "").strip()
-    if not api_key or not api_secret:
-        st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET como variáveis de ambiente.")
-        st.stop()
-    cli = FuturesAdapter(api_key, api_secret)
-    try:
-        cli.ping()
-        srv = cli.time()  # {'serverTime': ...}
-        st.caption(f"⏱️ Server time (ms): {srv.get('serverTime')}")
-    except Exception as e:
-        st.error(f"Falha ao conectar no Futures: {e}")
-        st.stop()
-    return cli
-
-client = get_client()
-
-# ============== Helpers REST públicos (klines spot) ==============
+# =======================
+# Helpers REST públicos (Spot klines)
+# =======================
 def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
     r = requests.get(
         f"{BINANCE_REST}/api/v3/klines",
@@ -166,7 +192,9 @@ def fetch_klines_rest(symbol: str, interval: str, limit: int = 500) -> pd.DataFr
         df[c] = df[c].astype(float)
     return df
 
-# ============== Indicadores e features ==============
+# =======================
+# Indicadores
+# =======================
 def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
     up = delta.clip(lower=0)
@@ -221,7 +249,9 @@ def confidence_from_features(row: pd.Series, trend: str, align_count: int) -> in
     conf = (0.35 * stf + 0.25 * vr + 0.20 * sr + 0.10 * rsi_comp + 0.10 * align_bonus) * 100
     return int(round(min(max(conf, 0), 100)))
 
-# ============== Multi-timeframe (cache) ==============
+# =======================
+# Multi-timeframe (cache)
+# =======================
 @st.cache_data(ttl=30)
 def load_multitf(symbol: str) -> Dict[str, pd.DataFrame]:
     d1 = fetch_klines_rest(symbol, "1d", 400)
@@ -231,7 +261,9 @@ def load_multitf(symbol: str) -> Dict[str, pd.DataFrame]:
             "1H": add_core_features(h1),
             "5M": add_core_features(m5)}
 
-# ============== UI Controles principais ==============
+# =======================
+# UI principal
+# =======================
 with st.container():
     colA, colB, colC = st.columns([1.5, 1, 1])
     with colA:
@@ -291,7 +323,9 @@ with c2:
     st.subheader("🔐 Confiança do Sinal")
     st.metric("Nível", f"{conf}/100")
 
-# ============== Parâmetros de risco / alvo ==============
+# =======================
+# Parâmetros de risco / alvo
+# =======================
 st.subheader("🎯 Parâmetros de Trade")
 col_r1, col_r2, col_r3, col_r4, col_r5 = st.columns(5)
 with col_r1:
@@ -373,27 +407,29 @@ with colS2:
     else:
         st.info("Sem TP/SL sugeridos (aguarde melhor alinhamento/confiança).")
 
-# ============== Funções Futures (UMFutures) ==============
+# =======================
+# Funções Futures (wrapper)
+# =======================
 def setup_futures_pair(symbol: str, leverage: int, margin_type: str) -> bool:
     try:
-        client.change_margin_type(symbol=symbol, marginType=margin_type, recvWindow=RECV_WINDOW_MS)
+        client.change_margin_type(symbol=symbol, marginType=margin_type)
     except Exception as e:
         if "No need to change margin type" not in str(e):
             st.error(f"Erro ao definir margem: {e}")
             return False
     try:
-        client.change_leverage(symbol=symbol, leverage=int(leverage), recvWindow=RECV_WINDOW_MS)
+        client.change_leverage(symbol=symbol, leverage=int(leverage))
     except Exception as e:
         st.error(f"Erro ao definir alavancagem: {e}")
         return False
     return True
 
-def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_price: float, tp_price: float):
+def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_p: float, tp_p: float) -> Tuple[bool, Any]:
     try:
         # Entrada a mercado
         order_resp = client.new_order(
             symbol=symbol,
-            side=side,  # "BUY" ou "SELL"
+            side=side,             # "BUY" ou "SELL"
             type="MARKET",
             quantity=quantity,
             recvWindow=RECV_WINDOW_MS,
@@ -402,23 +438,23 @@ def executar_ordem_mercado(symbol: str, side: str, quantity: float, sl_price: fl
         if side == "BUY":
             client.new_order(
                 symbol=symbol, side="SELL", type="STOP_MARKET",
-                stopPrice=round(sl_price, 6), closePosition="true",
+                stopPrice=round(sl_p, 6), closePosition="true",
                 timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
             client.new_order(
                 symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
-                stopPrice=round(tp_price, 6), closePosition="true",
+                stopPrice=round(tp_p, 6), closePosition="true",
                 timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
         else:
             client.new_order(
                 symbol=symbol, side="BUY", type="STOP_MARKET",
-                stopPrice=round(sl_price, 6), closePosition="true",
+                stopPrice=round(sl_p, 6), closePosition="true",
                 timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
             client.new_order(
                 symbol=symbol, side="BUY", type="TAKE_PROFIT_MARKET",
-                stopPrice=round(tp_price, 6), closePosition="true",
+                stopPrice=round(tp_p, 6), closePosition="true",
                 timeInForce="GTC", recvWindow=RECV_WINDOW_MS
             )
         return True, order_resp
@@ -445,7 +481,9 @@ def get_symbol_precision(symbol: str) -> Dict[str, int]:
         pass
     return {"qty_precision": 3, "px_precision": 2}
 
-# ============== Execução ==============
+# =======================
+# Execução
+# =======================
 st.subheader("⚡ Execução")
 colE1, colE2, colE3, colE4 = st.columns([1,1,1,1])
 with colE1:
@@ -480,8 +518,8 @@ with colB2:
 
 # Saldo / conexão (opcional)
 try:
-    acc = client.account(recvWindow=RECV_WINDOW_MS)
-    total_margin_balance = acc.get("totalMarginBalance")
+    acc = client.account()
+    total_margin_balance = acc.get("totalMarginBalance") or acc.get("availableBalance")
     if total_margin_balance is not None:
         st.caption(f"✅ Conectado | Balance: {total_margin_balance} USDT")
 except Exception as e:
@@ -491,7 +529,7 @@ if execute_now:
     if setup_futures_pair(symbol, leverage, margin_type):
         ok, res = executar_ordem_mercado(
             symbol=symbol, side=desired_side, quantity=qty,
-            sl_price=sl_input, tp_price=tp_input
+            sl_p=sl_input, tp_p=tp_input
         )
         if ok:
             st.success("✅ Ordem executada com sucesso!")
@@ -499,4 +537,4 @@ if execute_now:
         else:
             st.error(f"❌ Erro na execução: {res}")
 
-st.caption("⚠️ Uso educacional. Ajuste TP/SL/quantidade de acordo com sua gestão e as precisões do símbolo.")
+st.caption("⚠️ Uso educacional. Ajuste TP/SL/quantidade conforme sua gestão e as precisões do símbolo.")
