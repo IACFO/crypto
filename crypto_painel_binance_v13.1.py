@@ -1,17 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Painel – Binance v13.1 (UMFutures / binance-connector)
-------------------------------------------------------
-• Multi-timeframe (1D, 1H, 5M) com EMA20/50/200 + RSI
-• Sugestão: COMPRAR / VENDER / AGUARDAR
-• TP/SL via ATR (5m)
-• Execução em USDT-M Futures (UMFutures)
-• Somente variáveis de ambiente (os.environ) para as credenciais
 """
-
 from __future__ import annotations
-import os
-import time
+import os, time, importlib.util, importlib
 from typing import Dict, Optional
 
 import numpy as np
@@ -19,81 +11,49 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# SDK OFICIAL (NÃO usar python-binance)
-# ===== Import robusto do cliente Futures (binance-connector) + detecção de sombra =====
-import sys, inspect, pathlib, streamlit as st
-
-def _is_site_packages(path_str: str) -> bool:
-    p = pathlib.Path(path_str).as_posix().lower()
-    return "/site-packages/" in p or "\\site-packages\\" in p
-
-# 1) Verifica se existe módulo local "binance" sombreando o pacote do PyPI
-_local_shadow_msg = None
-if "binance" in sys.modules:
-    try:
-        import binance  # type: ignore
-        mod_path = inspect.getfile(binance)
-        if not _is_site_packages(mod_path):
-            _local_shadow_msg = f"O Python está importando 'binance' de {mod_path}, não do site-packages."
-    except Exception:
-        pass
-else:
-    # Tenta importar para inspecionar o caminho
-    try:
-        import binance  # type: ignore
-        mod_path = inspect.getfile(binance)
-        if not _is_site_packages(mod_path):
-            _local_shadow_msg = f"O Python está importando 'binance' de {mod_path}, não do site-packages."
-    except Exception:
-        binance = None
-        mod_path = "não encontrado"
-
-if _local_shadow_msg:
-    st.error(
-        "📦 Conflito de nomes detectado: há um **diretório/arquivo chamado `binance` no seu projeto** "
-        "que está sombreando o pacote `binance-connector` do PyPI.\n\n"
-        f"{_local_shadow_msg}\n\n"
-        "→ Renomeie a pasta/arquivo para algo como `binance_local/` e ajuste os imports.\n"
-        "→ Depois, em Render: *Settings → Clear build cache → Deploy latest*."
-    )
-    st.stop()
-
-# 2) Agora importa o cliente oficial do conector
-try:
-    from binance.um_futures import UMFutures  # ✅ caminho correto nas versões 3.x
-    CONNECTOR_OK = True
-    # tenta obter a versão do pacote instalado
-    try:
-        import binance  # type: ignore
-        BINANCE_PKG_VERSION = getattr(binance, "__version__", "desconhecida")
-        BINANCE_PKG_FILE = inspect.getfile(binance)
-    except Exception:
-        BINANCE_PKG_VERSION = "desconhecida"
-        BINANCE_PKG_FILE = "desconhecido"
-except Exception as import_err:
-    CONNECTOR_OK = False
-    BINANCE_PKG_VERSION = "não encontrado"
-    BINANCE_PKG_FILE = str(import_err)
-
-if not CONNECTOR_OK:
-    st.error(
-        "Falha ao importar `UMFutures` do `binance-connector`.\n\n"
-        f"Detalhe: {BINANCE_PKG_FILE}\n"
-        f"binance.__version__: {BINANCE_PKG_VERSION}\n\n"
-        "Verifique:\n"
-        "1) `requirements.txt` contém `binance-connector==3.12.0`\n"
-        "2) Render → Settings → Clear build cache → Deploy latest\n"
-        "3) Não existe `python-binance` no requirements\n"
-        "4) Não existe pasta/arquivo chamado `binance` no repositório (sombra)."
-    )
-    st.stop()
-else:
-    st.caption(f"🧩 binance-connector OK | versão: {BINANCE_PKG_VERSION}")
-    
-# ===== Streamlit =====
+# ===== Streamlit (tem que vir antes de usar st.*) =====
 st.set_page_config(page_title="📊 Painel – Binance v13.1 (UMFutures)", layout="wide")
-st.title("📊 Painel – Binance v13.1 (UMFutures)")
-st.caption("Compatível com Render – usa binance-connector (UMFutures) e variáveis de ambiente.")
+
+# ===== Verificação do pacote binance-connector (diagnóstico robusto) =====
+def _diagnose_binance_connector():
+    # 1) O pacote 'binance-connector' expõe o módulo top-level 'binance'
+    spec_pkg = importlib.util.find_spec("binance")
+    pkg_path = getattr(spec_pkg, "origin", None) if spec_pkg else None
+
+    # 2) Tentar localizar o submódulo 'binance.um_futures'
+    spec_umf = importlib.util.find_spec("binance.um_futures")
+
+    # 3) Versão (quando disponível)
+    try:
+        import binance  # type: ignore
+        pkg_ver = getattr(binance, "__version__", "desconhecida")
+    except Exception:
+        pkg_ver = "não encontrado"
+
+    return spec_pkg is not None, spec_umf is not None, pkg_ver, pkg_path
+
+pkg_ok, umf_ok, pkg_ver, pkg_path = _diagnose_binance_connector()
+
+if not pkg_ok or not umf_ok:
+    st.error(
+        "Falha ao importar `UMFutures` do **binance-connector**.\n\n"
+        f"Detalhe: módulo 'binance' encontrado? {pkg_ok} | submódulo 'binance.um_futures' encontrado? {umf_ok}\n"
+        f"versão reportada: {pkg_ver}\n"
+        f"caminho carregado: {pkg_path}\n\n"
+        "Como corrigir:\n"
+        "1) Confirme no **requirements.txt**: `binance-connector==3.12.0`\n"
+        "2) No Render: **Settings → Clear build cache → Deploy latest**\n"
+        "3) Verifique que **não existe** `python-binance` no requirements\n"
+        "4) Verifique que **não existe** arquivo/pasta chamada `binance` dentro do repositório (isso sombreia o pacote)\n"
+        "5) Build Command: `pip install --upgrade pip wheel setuptools && pip install -r requirements.txt`\n"
+        "6) Start Command: `streamlit run crypto_painel_binance_v13.1.py --server.port $PORT --server.address 0.0.0.0`\n"
+    )
+    st.stop()
+
+# Importa definitivamente (sabemos que existe)
+from binance.um_futures import UMFutures  # type: ignore
+
+st.caption(f"🧩 Conector OK • binance-connector versão: {pkg_ver} • caminho: {pkg_path}")
 
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 60_000  # 60s
@@ -120,7 +80,6 @@ def get_client() -> UMFutures:
         st.error("Credenciais ausentes. Defina BINANCE_API_KEY e BINANCE_API_SECRET como variáveis de ambiente.")
         st.stop()
     cl = UMFutures(key=api_key, secret=api_secret)
-    # Diagnóstico inicial
     try:
         cl.ping()
         srv = cl.time()  # {'serverTime': ...}
