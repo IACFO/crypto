@@ -60,6 +60,12 @@ def show_ntp_reference():
         st.caption(f"🕒 NTP ref indisponível: {e}")
 show_ntp_reference()
 
+# ===================== Constantes globais =====================
+PAIRS_DEFAULT = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT",
+    "SOLUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT"
+]
+
 # ---------------- Constantes ----------------
 BINANCE_REST = "https://api.binance.com"
 RECV_WINDOW_MS = 90_000  # 90s
@@ -390,10 +396,11 @@ with colA:
     default_focus = st.session_state.get("_forced_focus_symbol", "ETHUSDT")
     symbol = st.selectbox(
         "Par (USDT-M Futures)",
-        ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"],
+        PAIRS_DEFAULT,
         index=0 if default_focus not in PAIRS_DEFAULT else PAIRS_DEFAULT.index(default_focus),
         key="focus_symbol_select",
     )
+
 
 with colB:
     margin_type = st.selectbox("Tipo de margem", ["ISOLATED","CROSSED"], index=0)
