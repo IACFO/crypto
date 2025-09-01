@@ -387,7 +387,14 @@ st.subheader("📡 Painel")
 colA, colB, colC = st.columns([1.5, 1, 1])
 with colA:
     focus_symbol_list = ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"]
-    symbol = st.selectbox("Par (USDT-M Futures)", focus_symbol_list, index=1)
+    default_focus = st.session_state.get("_forced_focus_symbol", "ETHUSDT")
+    symbol = st.selectbox(
+        "Par (USDT-M Futures)",
+        ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"],
+        index=0 if default_focus not in PAIRS_DEFAULT else PAIRS_DEFAULT.index(default_focus),
+        key="focus_symbol_select",
+    )
+
 with colB:
     margin_type = st.selectbox("Tipo de margem", ["ISOLATED","CROSSED"], index=0)
 with colC:
@@ -432,6 +439,124 @@ with cL:
 with cR:
     st.subheader("🔐 Confiança do Sinal")
     st.metric("Nível", f"{conf}/100")
+
+# ===================== Scanner de pares – alinhamento + confiança =====================
+st.subheader("🧭 Scanner de pares – alinhamento + confiança")
+
+PAIRS_DEFAULT = ["BTCUSDT","ETHUSDT","BNBUSDT","ADAUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","LINKUSDT"]
+
+col_sc_top1, col_sc_top2, col_sc_top3, col_sc_top4 = st.columns([2,1,1,1])
+with col_sc_top1:
+    scan_pairs = st.multiselect(
+        "Selecione os pares para escanear",
+        PAIRS_DEFAULT, default=PAIRS_DEFAULT
+    )
+with col_sc_top2:
+    scan_interval = st.number_input("⏱️ Auto-scan (s)", 10, 300, 60, step=5)
+with col_sc_top3:
+    alert_thresh = st.number_input("🔔 Confiança p/ alertar", 50, 100, 80, step=1)
+with col_sc_top4:
+    auto_scan = st.toggle("Auto-refresh", True)
+
+# Força reexecução automática (sem bloquear UI)
+if auto_scan:
+    st_autorefresh(interval=scan_interval*1000, key="auto_scan_scanner_v13_1")
+
+# pequeno nonce pra "invalidar" o cache quando clicar "Scan agora"
+if "_scan_nonce" not in st.session_state:
+    st.session_state._scan_nonce = 0
+col_sc_btn1, col_sc_btn2 = st.columns([1,3])
+with col_sc_btn1:
+    if st.button("🔎 Scan agora", use_container_width=True):
+        st.session_state._scan_nonce += 1
+
+@st.cache_data(ttl=25, show_spinner=False)
+def scan_pair(sym: str, nonce: int) -> Dict:
+    """Carrega 1D/1H/5M (limites menores p/ rapidez), calcula sinal e confiança."""
+    try:
+        # limites menores para reduzir latência no Render
+        d1 = add_core_features(fetch_klines_rest(sym, "1d", 300))
+        h1 = add_core_features(fetch_klines_rest(sym, "1h", 400))
+        m5 = add_core_features(fetch_klines_rest(sym, "5m", 400))
+    except Exception as e:
+        return {"Par": sym, "Erro": str(e), "Sugestão": "—"}
+
+    b1, b2, b3 = d1.iloc[-1], h1.iloc[-1], m5.iloc[-1]
+    trends = [trend_label(x) for x in (b1, b2, b3)]
+    count_up = trends.count("ALTA")
+    count_dn = trends.count("BAIXA")
+    align = max(count_up, count_dn)
+    consensus = "ALTA" if count_up > count_dn else ("BAIXA" if count_dn > count_up else "NEUTRA")
+    conf_local = confidence_from_features(b3, consensus, align)
+
+    price = float(b3["c"]); atr5 = float(b3["atr14"] or 0.0)
+
+    sug = "AGUARDAR"
+    if align == 3 and conf_local >= 60:
+        sug = "COMPRAR" if consensus == "ALTA" else ("VENDER" if consensus == "BAIXA" else "AGUARDAR")
+    elif align == 2 and conf_local >= 70:
+        sug = "COMPRAR" if consensus == "ALTA" else ("VENDER" if consensus == "BAIXA" else "AGUARDAR")
+
+    sl = tp = None; stop_pct = tp_pct = None
+    if sug != "AGUARDAR" and atr5 > 0:
+        if sug == "COMPRAR":
+            sl = price - 1.0*atr5; tp = price + 1.5*atr5
+            stop_pct = (price - sl)/price; tp_pct = (tp - price)/price
+        else:
+            sl = price + 1.0*atr5; tp = price - 1.5*atr5
+            stop_pct = (sl - price)/price; tp_pct = (price - tp)/price
+
+    score = align * conf_local
+    return {
+        "Par": sym,
+        "Consenso": consensus,
+        "Alinhamento": align,
+        "Confiança": conf_local,
+        "Sugestão": sug,
+        "Preço": round(price, 6),
+        "Stop": (round(sl, 6) if sl else None),
+        "Alvo": (round(tp, 6) if tp else None),
+        "Stop%": (round(stop_pct*100, 2) if stop_pct is not None else None),
+        "Alvo%": (round(tp_pct*100, 2) if tp_pct is not None else None),
+        "Score": score
+    }
+
+rows = []
+if scan_pairs:
+    prog = st.progress(0, text="Escaneando pares…")
+    total = len(scan_pairs)
+    for i, p in enumerate(scan_pairs, start=1):
+        rows.append(scan_pair(p, st.session_state._scan_nonce))
+        prog.progress(i/total, text=f"Escaneando {p} ({i}/{total})")
+    prog.empty()
+
+df_scan = pd.DataFrame(rows)
+if not df_scan.empty:
+    # ordena: maior confiança e melhor sugestão primeiro
+    sug_order = {"COMPRAR":0,"VENDER":1,"AGUARDAR":2,"—":3}
+    if "Sugestão" in df_scan.columns:
+        df_scan["__s"] = df_scan["Sugestão"].map(sug_order).fillna(3)
+        df_scan = df_scan.sort_values(["__s","Confiança"], ascending=[True, False]).drop(columns="__s")
+
+    st.dataframe(df_scan, use_container_width=True, height=360)
+
+    # Melhor candidato p/ “foco”
+    best_row = df_scan[df_scan["Sugestão"].isin(["COMPRAR","VENDER"])].head(1)
+    if best_row.empty:
+        best_row = df_scan.head(1)
+    best_symbol = best_row.iloc[0]["Par"]
+
+    c_pick1, c_pick2 = st.columns([2,1])
+    with c_pick1:
+        st.caption(f"Sugestão de par para **Foco**: {best_symbol}")
+    with c_pick2:
+        if st.button(f"➡️ Enviar {best_symbol} para o painel de foco", use_container_width=True):
+            # guarda na sessão e força recarregar a UI de foco
+            st.session_state["_forced_focus_symbol"] = best_symbol
+            st.experimental_rerun()
+else:
+    st.info("Selecione ao menos um par para escanear.")
+
 
 # --------- Parâmetros ----------
 st.subheader("🎯 Parâmetros de Trade")
